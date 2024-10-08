@@ -66,6 +66,9 @@ load(
 )
 
 def envoy_package(default_visibility = ["//visibility:public"]):
+    # `native.package(default_visibility = default_visibility)` 这句话的作用是定义一个包的默认可见性。`native.package` 是 Bazel 的一个内置函数，用于设置当前包的属性。`default_visibility` 参数指定了该包中目标的默认可见性。
+          #
+          #在这个上下文中，`default_visibility` 是一个参数，通常是一个包含可见性标签的列表，例如 `["//visibility:public"]`，这意味着该包中的所有目标默认对所有其他包可见。
     native.package(default_visibility = default_visibility)
 
 def envoy_extension_package(enabled_default = True, default_visibility = EXTENSION_PACKAGE_VISIBILITY):

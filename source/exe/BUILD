@@ -29,6 +29,9 @@ envoy_cc_binary(
         "//bazel:windows_opt_build": ["generate_pdb_file"],
         "//conditions:default": [],
     }),
+    # `stamped = True` 参数用于指示 Bazel 在构建目标时是否应包含构建信息（例如构建时间、构建用户等）。
+    # 当 `stamped` 设置为 `True` 时，Bazel 会在构建输出中嵌入这些信息。
+    # 这在调试和版本管理中可能非常有用，因为它允许你追踪构建的来源和时间。
     stamped = True,
     deps = [":envoy_main_entry_lib"],
 )
@@ -56,6 +59,9 @@ envoy_cc_library(
 envoy_cc_library(
     name = "envoy_main_entry_lib",
     srcs = ["main.cc"],
+    # `external_deps` 指令用于指定目标所依赖的外部库或依赖项。
+    # 这些外部依赖项通常是通过包管理器（如 `abseil`）或其他外部源获取的。
+    # 通过将这些依赖项列在 `external_deps` 中，Bazel 可以在构建过程中正确地包含和链接这些外部库。
     external_deps = [
         "abseil_symbolize",
     ],
