@@ -1,0 +1,100 @@
+static_resources:
+  listeners:
+    - name: listener_0
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 10000
+      filter_chains:
+        # Envoy's filter mechanism is a powerful feature that allows you to process and manipulate network traffic as it flows through the proxy. Filters can be applied at various stages of the request/response lifecycle, such as network filters, HTTP filters, and access loggers.
+        #
+        #### Filter Types
+        #
+        #1. **Network Filters**: Operate at the transport layer (L4) and can handle raw TCP/UDP traffic.
+        #2. **HTTP Filters**: Operate at the application layer (L7) and can handle HTTP/1.1, HTTP/2, and gRPC traffic.
+        #3. **Access Loggers**: Used to log request and response data.
+        #
+        #### Filter Configuration
+        #
+        #Filters are configured in the Envoy configuration file (usually a YAML file). Each filter has a name and a `typed_config` field that specifies the filter's configuration.
+        #
+        #### `@type` Field
+        #
+        #The `@type` field within the `typed_config` specifies the fully qualified name of the filter's configuration type. This is usually a Protobuf message type that defines the configuration schema for the filter.
+        #
+        #### Example
+        #
+        #Here is an example of an HTTP filter configuration:
+        #
+        #```yaml
+        #- name: envoy.filters.network.http_connection_manager
+        #  typed_config:
+        #    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+        #    stat_prefix: ingress_http
+        #    http_filters:
+        #      - name: envoy.filters.http.router
+        #        typed_config:
+        #          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        #```
+        #
+        #In this example:
+        #- `envoy.filters.network.http_connection_manager` is the name of the network filter.
+        #- `type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager` is the Protobuf type that defines the configuration for the HTTP connection manager.
+        #- `envoy.filters.http.router` is the name of the HTTP filter.
+        #- `type.googleapis.com/envoy.extensions.filters.http.router.v3.Router` is the Protobuf type that defines the configuration for the router filter.
+        #
+        #### Summary
+        #
+        #- **Filters**: Allow processing and manipulation of network traffic.
+        #- **Types**: Network filters, HTTP filters, and access loggers.
+        #- **`@type` Field**: Specifies the Protobuf message type for the filter's configuration.
+        #
+        #The `@type` field does not directly specify a function but rather the configuration schema that the filter will use. The actual processing logic is implemented in the filter's code, which is invoked based on this configuration.
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              # 下面是详细配置
+              typed_config:
+                # `"@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager`
+                # specifies the fully qualified name of the Protobuf message type that defines the configuration schema for the `HttpConnectionManager` filter in Envoy.
+                # This tells Envoy to use the configuration defined by the `HttpConnectionManager` message type from the specified Protobuf package.
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress_http
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: local_service
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            host_rewrite_literal: www.envoyproxy.io
+                            cluster: service_envoyproxy_io
+
+  clusters:
+    - name: service_envoyproxy_io
+      type: LOGICAL_DNS
+      # Comment out the following line to test on v6 networks
+      dns_lookup_family: V4_ONLY
+      load_assignment:
+        cluster_name: service_envoyproxy_io
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: www.envoyproxy.io
+                      port_value: 443
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: www.envoyproxy.io
