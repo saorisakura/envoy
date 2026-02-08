@@ -27,6 +27,7 @@
 #ifdef ENVOY_ENABLE_QUIC
 #include "source/common/quic/client_connection_factory_impl.h"
 #include "source/common/quic/quic_client_transport_socket_factory.h"
+
 #include "quiche/quic/core/deterministic_connection_id_generator.h"
 #endif
 
@@ -36,7 +37,7 @@
 #endif
 #include "test/mocks/common.h"
 #include "test/mocks/server/instance.h"
-#include "test/mocks/server/transport_socket_factory_context.h"
+#include "test/mocks/server/server_factory_context.h"
 #include "test/mocks/stats/mocks.h"
 #include "test/mocks/upstream/cluster_info.h"
 #include "test/test_common/environment.h"
@@ -143,11 +144,13 @@ Network::UpstreamTransportSocketFactoryPtr
 IntegrationUtil::createQuicUpstreamTransportSocketFactory(Api::Api& api, Stats::Store& store,
                                                           Ssl::ContextManager& context_manager,
                                                           ThreadLocal::Instance& threadlocal,
-                                                          const std::string& san_to_match) {
+                                                          const std::string& san_to_match,
+                                                          bool connect_to_upstreams) {
   NiceMock<Server::Configuration::MockTransportSocketFactoryContext> context;
   ON_CALL(context.server_context_, api()).WillByDefault(testing::ReturnRef(api));
   ON_CALL(context, statsScope()).WillByDefault(testing::ReturnRef(*store.rootScope()));
-  ON_CALL(context, sslContextManager()).WillByDefault(testing::ReturnRef(context_manager));
+  ON_CALL(context.server_context_, sslContextManager())
+      .WillByDefault(testing::ReturnRef(context_manager));
   ON_CALL(context.server_context_, threadLocal()).WillByDefault(testing::ReturnRef(threadlocal));
   envoy::extensions::transport_sockets::quic::v3::QuicUpstreamTransport
       quic_transport_socket_config;
@@ -155,10 +158,11 @@ IntegrationUtil::createQuicUpstreamTransportSocketFactory(Api::Api& api, Stats::
 #ifdef ENVOY_ENABLE_YAML
   initializeUpstreamTlsContextConfig(
       Ssl::ClientSslTransportOptions().setAlpn(true).setSan(san_to_match).setSni("lyft.com"),
-      *tls_context);
+      *tls_context, connect_to_upstreams);
 #else
   UNREFERENCED_PARAMETER(tls_context);
   UNREFERENCED_PARAMETER(san_to_match);
+  UNREFERENCED_PARAMETER(connect_to_upstreams);
   RELEASE_ASSERT(0, "unsupported");
 #endif // ENVOY_ENABLE_YAML
 
@@ -219,13 +223,12 @@ IntegrationUtil::makeSingleRequest(const Network::Address::InstanceConstSharedPt
 
   std::shared_ptr<Upstream::MockClusterInfo> cluster{new NiceMock<Upstream::MockClusterInfo>()};
   Upstream::HostDescriptionConstSharedPtr host_description =
-      std::make_shared<Upstream::HostDescriptionImpl>(
+      std::shared_ptr<Upstream::HostDescriptionImpl>(*Upstream::HostDescriptionImpl::create(
           cluster, "",
           *Network::Utility::resolveUrl(
               fmt::format("{}://127.0.0.1:80", (type == Http::CodecType::HTTP3 ? "udp" : "tcp"))),
-          nullptr, nullptr, envoy::config::core::v3::Locality().default_instance(),
-          envoy::config::endpoint::v3::Endpoint::HealthCheckConfig::default_instance(), 0,
-          time_system);
+          nullptr, nullptr, std::make_shared<envoy::config::core::v3::Locality>(),
+          envoy::config::endpoint::v3::Endpoint::HealthCheckConfig::default_instance(), 0));
 
   if (type <= Http::CodecType::HTTP2) {
     Http::CodecClientProd client(type,
@@ -246,7 +249,8 @@ IntegrationUtil::makeSingleRequest(const Network::Address::InstanceConstSharedPt
                                                "spiffe://lyft.com/backend-team");
   auto& quic_transport_socket_factory =
       dynamic_cast<Quic::QuicClientTransportSocketFactory&>(*transport_socket_factory);
-  auto persistent_info = std::make_unique<Quic::PersistentQuicInfoImpl>(*dispatcher, 0);
+  std::unique_ptr<Quic::PersistentQuicInfoImpl> persistent_info =
+      Quic::createPersistentQuicInfoForCluster(*dispatcher, *cluster, server_factory_context);
 
   Network::Address::InstanceConstSharedPtr local_address;
   if (addr->ip()->version() == Network::Address::IpVersion::v4) {

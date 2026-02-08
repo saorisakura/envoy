@@ -16,6 +16,7 @@ envoy_extension_cc_test(
     name = "adaptive_concurrency_filter_test",
     srcs = ["adaptive_concurrency_filter_test.cc"],
     extension_names = ["envoy.filters.http.adaptive_concurrency"],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/http:header_map_lib",
         "//source/common/http:headers_lib",
@@ -23,6 +24,20 @@ envoy_extension_cc_test(
         "//source/extensions/filters/http/adaptive_concurrency/controller:controller_lib",
         "//test/mocks/http:http_mocks",
         "//test/test_common:simulated_time_system_lib",
+        "//test/test_common:utility_lib",
+        "@envoy_api//envoy/extensions/filters/http/adaptive_concurrency/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_extension_cc_test(
+    name = "adaptive_concurrency_config_test",
+    srcs = ["adaptive_concurrency_config_test.cc"],
+    extension_names = ["envoy.filters.http.adaptive_concurrency"],
+    rbe_pool = "6gig",
+    deps = [
+        "//source/extensions/filters/http/adaptive_concurrency:config",
+        "//test/mocks/http:http_mocks",
+        "//test/mocks/server:factory_context_mocks",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/extensions/filters/http/adaptive_concurrency/v3:pkg_cc_proto",
     ],
@@ -40,6 +55,7 @@ envoy_extension_cc_test(
         "adaptive_concurrency_filter_integration_test.cc",
     ],
     extension_names = ["envoy.filters.http.adaptive_concurrency"],
+    rbe_pool = "6gig",
     deps = [
         ":adaptive_concurrency_filter_integration_test_lib",
         "//source/extensions/filters/http/adaptive_concurrency:config",

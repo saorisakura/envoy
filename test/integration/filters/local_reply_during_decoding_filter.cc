@@ -11,14 +11,51 @@
 
 namespace Envoy {
 
-class LocalReplyDuringDecode : public Http::PassThroughFilter {
+class LocalReplyDuringDecode : public Http::PassThroughFilter, public Http::UpstreamCallbacks {
 public:
   constexpr static char name[] = "local-reply-during-decode";
 
-  Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& request_headers, bool) override {
+  void setDecoderFilterCallbacks(Http::StreamDecoderFilterCallbacks& callbacks) override {
+    decoder_callbacks_ = &callbacks;
+    if (auto cb = decoder_callbacks_->upstreamCallbacks(); cb) {
+      cb->addUpstreamCallbacks(*this);
+    }
+  }
+
+  void onUpstreamConnectionEstablished() override {
+    if (latched_end_stream_.has_value()) {
+      const bool end_stream = *latched_end_stream_;
+      latched_end_stream_.reset();
+      Http::FilterHeadersStatus status = decodeHeaders(*request_headers_, end_stream);
+      if (status == Http::FilterHeadersStatus::Continue) {
+        decoder_callbacks_->continueDecoding();
+      }
+    }
+  }
+
+  Http::FilterHeadersStatus decodeHeaders(Http::RequestHeaderMap& request_headers,
+                                          bool end_stream) override {
+    // If this filter is being used as an upstream filter and the upstream connection is not yet
+    // established, check for the "wait-upstream-connection" header to determine whether to wait
+    // for the connection to be established before continuing decoding.
+    if (auto cb = decoder_callbacks_->upstreamCallbacks(); cb && !cb->upstream()) {
+      auto result = request_headers.get(Http::LowerCaseString("wait-upstream-connection"));
+      if (!result.empty() && result[0]->value() == "true") {
+        request_headers_ = &request_headers;
+        latched_end_stream_ = end_stream;
+        return Http::FilterHeadersStatus::StopAllIterationAndBuffer;
+      }
+    }
+
     auto result = request_headers.get(Http::LowerCaseString("skip-local-reply"));
     if (!result.empty() && result[0]->value() == "true") {
-      local_reply_skipped_ = true;
+      header_local_reply_skipped_ = true;
+      return Http::FilterHeadersStatus::Continue;
+    }
+    result = request_headers.get(Http::LowerCaseString("local-reply-during-data"));
+    if (!result.empty() && result[0]->value() == "true") {
+      local_reply_during_data_ = true;
+      header_local_reply_skipped_ = true;
       return Http::FilterHeadersStatus::Continue;
     }
     decoder_callbacks_->sendLocalReply(Http::Code::InternalServerError, "", nullptr, absl::nullopt,
@@ -26,20 +63,25 @@ public:
     return Http::FilterHeadersStatus::StopIteration;
   }
 
-  // Due to the above local reply, this method should never be invoked in tests.
   Http::FilterDataStatus decodeData(Buffer::Instance&, bool) override {
-    ASSERT(local_reply_skipped_);
+    ASSERT(header_local_reply_skipped_);
+    if (local_reply_during_data_) {
+      decoder_callbacks_->sendLocalReply(Http::Code::InternalServerError, "", nullptr,
+                                         absl::nullopt, "");
+    }
     return Http::FilterDataStatus::Continue;
   }
 
-  // Due to the above local reply, this method should never be invoked in tests.
   Http::FilterMetadataStatus decodeMetadata(Http::MetadataMap&) override {
-    ASSERT(local_reply_skipped_);
+    ASSERT(header_local_reply_skipped_);
     return Http::FilterMetadataStatus::Continue;
   }
 
 private:
-  bool local_reply_skipped_ = false;
+  Http::RequestHeaderMap* request_headers_{};
+  absl::optional<bool> latched_end_stream_;
+  bool header_local_reply_skipped_ = false;
+  bool local_reply_during_data_ = false;
 };
 
 constexpr char LocalReplyDuringDecode::name[];

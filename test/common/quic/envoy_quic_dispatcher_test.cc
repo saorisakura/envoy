@@ -33,6 +33,7 @@
 #include "quiche/quic/test_tools/quic_dispatcher_peer.h"
 #include "quiche/quic/test_tools/quic_test_utils.h"
 
+using testing::AnyNumber;
 using testing::Invoke;
 using testing::Return;
 using testing::ReturnRef;
@@ -78,7 +79,7 @@ public:
         connection_id_(quic::test::TestConnectionId(1)),
         transport_socket_factory_(*QuicServerTransportSocketFactory::create(
             true, listener_config_.listenerScope(),
-            std::make_unique<NiceMock<Ssl::MockServerContextConfig>>(), ssl_context_manager_, {})) {
+            std::make_unique<NiceMock<Ssl::MockServerContextConfig>>(), ssl_context_manager_)) {
     auto writer = new testing::NiceMock<quic::test::MockPacketWriter>();
     envoy_quic_dispatcher_.InitializeWithWriter(writer);
     EXPECT_CALL(*writer, WritePacket(_, _, _, _, _, _))
@@ -211,6 +212,7 @@ public:
           // Stop iteration to avoid calling getRead/WriteBuffer().
           .WillOnce(Return(Network::FilterStatus::StopIteration));
       EXPECT_CALL(network_connection_callbacks_, onEvent(Network::ConnectionEvent::LocalClose));
+      EXPECT_CALL(write_total_, add(_)).Times(AnyNumber());
     }
 
   private:
@@ -219,7 +221,8 @@ public:
     Network::MockConnectionCallbacks network_connection_callbacks_;
     testing::StrictMock<Stats::MockCounter> read_total_;
     testing::StrictMock<Stats::MockGauge> read_current_;
-    testing::StrictMock<Stats::MockCounter> write_total_;
+    // Currently QUIC only populates write_total_.
+    testing::NiceMock<Stats::MockCounter> write_total_;
     testing::StrictMock<Stats::MockGauge> write_current_;
 
     Filter::NetworkFilterFactoriesList filter_factory_;
@@ -271,7 +274,8 @@ TEST_P(EnvoyQuicDispatcherTest, CloseConnectionDuringNetworkFilterInstallation) 
   Network::MockConnectionCallbacks network_connection_callbacks;
   testing::StrictMock<Stats::MockCounter> read_total;
   testing::StrictMock<Stats::MockGauge> read_current;
-  testing::StrictMock<Stats::MockCounter> write_total;
+  testing::NiceMock<Stats::MockCounter> write_total;
+  EXPECT_CALL(write_total, add(_)).Times(AnyNumber());
   testing::StrictMock<Stats::MockGauge> write_current;
 
   Filter::NetworkFilterFactoriesList filter_factory;
@@ -433,7 +437,8 @@ TEST_P(EnvoyQuicDispatcherTest, CloseWithGivenFilterChain) {
   Network::MockConnectionCallbacks network_connection_callbacks;
   testing::StrictMock<Stats::MockCounter> read_total;
   testing::StrictMock<Stats::MockGauge> read_current;
-  testing::StrictMock<Stats::MockCounter> write_total;
+  testing::NiceMock<Stats::MockCounter> write_total;
+  EXPECT_CALL(write_total, add(_)).Times(AnyNumber());
   testing::StrictMock<Stats::MockGauge> write_current;
 
   Filter::NetworkFilterFactoriesList filter_factory;

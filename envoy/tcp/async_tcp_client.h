@@ -10,7 +10,7 @@ namespace Tcp {
  * AsyncTcpClientOptions for the creation of async tcp client;
  */
 struct AsyncTcpClientOptions {
-  AsyncTcpClientOptions(bool enable_half_close) : enable_half_close(enable_half_close){};
+  AsyncTcpClientOptions(bool enable_half_close) : enable_half_close(enable_half_close) {};
   bool enable_half_close;
 };
 
@@ -59,7 +59,7 @@ public:
   /**
    * @return the detected close type from socket.
    */
-  virtual Network::DetectedCloseType detectedCloseType() const PURE;
+  virtual StreamInfo::DetectedCloseType detectedCloseType() const PURE;
 
   /**
    * Write data through the client.

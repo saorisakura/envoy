@@ -17,6 +17,7 @@
 #include "test/common/stream_info/test_int_accessor.h"
 #include "test/mocks/api/mocks.h"
 #include "test/mocks/http/mocks.h"
+#include "test/mocks/server/server_factory_context.h"
 #include "test/mocks/ssl/mocks.h"
 #include "test/mocks/stream_info/mocks.h"
 #include "test/mocks/upstream/host.h"
@@ -70,14 +71,14 @@ TEST(HeaderParserTest, TestParse) {
       {"%DOWNSTREAM_LOCAL_ADDRESS%", {"127.0.0.2:0"}, {}},
       {"%DOWNSTREAM_LOCAL_PORT%", {"0"}, {}},
       {"%DOWNSTREAM_LOCAL_ADDRESS_WITHOUT_PORT%", {"127.0.0.2"}, {}},
-      {"%UPSTREAM_METADATA([\"ns\", \"key\"])%", {"value"}, {}},
-      {"[%UPSTREAM_METADATA([\"ns\", \"key\"])%", {"[value"}, {}},
-      {"%UPSTREAM_METADATA([\"ns\", \"key\"])%]", {"value]"}, {}},
-      {"[%UPSTREAM_METADATA([\"ns\", \"key\"])%]", {"[value]"}, {}},
-      {"%UPSTREAM_METADATA([\"ns\", \t \"key\"])%", {"value"}, {}},
-      {"%UPSTREAM_METADATA([\"ns\", \n \"key\"])%", {"value"}, {}},
-      {"%UPSTREAM_METADATA( \t [ \t \"ns\" \t , \t \"key\" \t ] \t )%", {"value"}, {}},
-      {R"EOF(%UPSTREAM_METADATA(["\"quoted\"", "\"key\""])%)EOF", {"value"}, {}},
+      {"%DOWNSTREAM_DIRECT_LOCAL_ADDRESS%", {"127.0.0.2:0"}, {}},
+      {"%DOWNSTREAM_DIRECT_LOCAL_PORT%", {"0"}, {}},
+      {"%DOWNSTREAM_DIRECT_LOCAL_ADDRESS_WITHOUT_PORT%", {"127.0.0.2"}, {}},
+      {"%UPSTREAM_METADATA(ns:key)%", {"value"}, {}},
+      {"[%UPSTREAM_METADATA(ns:key)%", {"[value"}, {}},
+      {"%UPSTREAM_METADATA(ns:key)%]", {"value]"}, {}},
+      {"[%UPSTREAM_METADATA(ns:key)%]", {"[value]"}, {}},
+      {"%UPSTREAM_METADATA(ns:key)%", {"value"}, {}},
       {"%UPSTREAM_REMOTE_ADDRESS%", {"10.0.0.1:443"}, {}},
       {"%UPSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%", {"10.0.0.1"}, {}},
       {"%UPSTREAM_REMOTE_PORT%", {"443"}, {}},
@@ -217,7 +218,7 @@ TEST(HeaderParserTest, TestParse) {
 
     if (test_case.expected_exception_) {
       EXPECT_FALSE(test_case.expected_output_);
-      EXPECT_THROW(THROW_IF_STATUS_NOT_OK(HeaderParser::configure(to_add), throw), EnvoyException);
+      EXPECT_THROW(THROW_IF_NOT_OK_REF(HeaderParser::configure(to_add).status()), EnvoyException);
       continue;
     }
 
@@ -238,7 +239,49 @@ TEST(HeaderParserTest, TestParse) {
   }
 }
 
+TEST(HeaderParser, TestInternalAddressTranslator) {
+  struct TestCase {
+    std::string input_;
+    std::string expected_output_;
+  };
+
+  static const TestCase test_cases[] = {
+      {"%DOWNSTREAM_LOCAL_ADDRESS_ENDPOINT_ID%", "1234567890"},
+      {"%DOWNSTREAM_DIRECT_LOCAL_ADDRESS_ENDPOINT_ID%", "1234567890"},
+      {"%UPSTREAM_REMOTE_ADDRESS_ENDPOINT_ID%", "1111111111"},
+  };
+
+  NiceMock<Envoy::StreamInfo::MockStreamInfo> stream_info;
+  auto downstream_local_address = Network::Address::InstanceConstSharedPtr{
+      new Network::Address::EnvoyInternalInstance("downstream", "1234567890")};
+  stream_info.downstream_connection_info_provider_->setLocalAddress(downstream_local_address);
+  stream_info.downstream_connection_info_provider_->setDirectLocalAddressForTest(
+      downstream_local_address);
+  auto upstream_address = Network::Address::InstanceConstSharedPtr{
+      new Network::Address::EnvoyInternalInstance("upstream", "1111111111")};
+  stream_info.upstreamInfo()->setUpstreamRemoteAddress(upstream_address);
+
+  for (const auto& test_case : test_cases) {
+    Protobuf::RepeatedPtrField<envoy::config::core::v3::HeaderValueOption> to_add;
+    envoy::config::core::v3::HeaderValueOption* header = to_add.Add();
+    header->mutable_header()->set_key("x-header");
+    header->mutable_header()->set_value(test_case.input_);
+
+    HeaderParserPtr req_header_parser = HeaderParser::configure(to_add).value();
+    Http::TestRequestHeaderMapImpl header_map{{":method", "POST"}};
+    req_header_parser->evaluateHeaders(header_map, stream_info);
+
+    std::string descriptor = fmt::format("for test case input: {}", test_case.input_);
+    EXPECT_TRUE(header_map.has("x-header")) << descriptor;
+    EXPECT_EQ(test_case.expected_output_, header_map.get_("x-header")) << descriptor;
+  }
+}
+
 TEST(HeaderParser, TestMetadataTranslator) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  ScopedThreadLocalServerContextSetter setter(context);
+  EXPECT_CALL(context.runtime_loader_, countDeprecatedFeatureUse()).Times(testing::AtLeast(1));
+
   struct TestCase {
     std::string input_;
     std::string expected_output_;
@@ -278,6 +321,10 @@ TEST(HeaderParser, TestMetadataTranslatorExceptions) {
 }
 
 TEST(HeaderParser, TestPerFilterStateTranslator) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  ScopedThreadLocalServerContextSetter setter(context);
+  EXPECT_CALL(context.runtime_loader_, countDeprecatedFeatureUse()).Times(testing::AtLeast(1));
+
   struct TestCase {
     std::string input_;
     std::string expected_output_;
@@ -428,7 +475,11 @@ TEST(HeaderParserTest, EvaluateHeaderValuesWithNullStreamInfo) {
   EXPECT_FALSE(header_map.has("empty"));
 }
 
-TEST(HeaderParserTest, EvaluateEmptyHeaders) {
+TEST(HeaderParserTest, EvaluateEmptyHeadersWithLegacyFormat) {
+  TestScopedRuntime scoped_runtime;
+  scoped_runtime.mergeValues(
+      {{"envoy.reloadable_features.remove_legacy_route_formatter", "false"}});
+
   const std::string yaml = R"EOF(
 match: { prefix: "/new_endpoint" }
 route:
@@ -438,6 +489,32 @@ request_headers_to_add:
   - header:
       key: "x-key"
       value: "%UPSTREAM_METADATA([\"namespace\", \"key\"])%"
+    append_action: APPEND_IF_EXISTS_OR_ADD
+)EOF";
+
+  HeaderParserPtr req_header_parser =
+      HeaderParser::configure(parseRouteFromV3Yaml(yaml).request_headers_to_add()).value();
+  Http::TestRequestHeaderMapImpl header_map{{":method", "POST"}};
+  std::shared_ptr<NiceMock<Envoy::Upstream::MockHostDescription>> host(
+      new NiceMock<Envoy::Upstream::MockHostDescription>());
+  NiceMock<Envoy::StreamInfo::MockStreamInfo> stream_info;
+  auto metadata = std::make_shared<envoy::config::core::v3::Metadata>();
+  stream_info.upstreamInfo()->setUpstreamHost(host);
+  ON_CALL(*host, metadata()).WillByDefault(Return(metadata));
+  req_header_parser->evaluateHeaders(header_map, stream_info);
+  EXPECT_FALSE(header_map.has("x-key"));
+}
+
+TEST(HeaderParserTest, EvaluateEmptyHeaders) {
+  const std::string yaml = R"EOF(
+match: { prefix: "/new_endpoint" }
+route:
+  cluster: "www2"
+  prefix_rewrite: "/api/new_endpoint"
+request_headers_to_add:
+  - header:
+      key: "x-key"
+      value: "%UPSTREAM_METADATA(namespace:key)%"
     append_action: APPEND_IF_EXISTS_OR_ADD
 )EOF";
 
@@ -505,7 +582,7 @@ request_headers_to_add:
       value: "%PROTOCOL%%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
   - header:
       key: "x-metadata"
-      value: "%UPSTREAM_METADATA([\"namespace\", \"%key%\"])%"
+      value: "%UPSTREAM_METADATA(namespace:%key%)%"
   - header:
       key: "x-per-request"
       value: "%PER_REQUEST_STATE(testing)%"
@@ -1087,6 +1164,10 @@ response_headers_to_add:
       key: "x-per-header"
       value: "per"
     append_action: ADD_IF_ABSENT
+  - header:
+      key: "x-baz-header"
+      value: "baz"
+    append_action: OVERWRITE_IF_EXISTS # Unsupported action for getHeaderTransforms
 response_headers_to_remove: ["x-baz-header"]
 )EOF";
 
@@ -1096,16 +1177,31 @@ response_headers_to_remove: ["x-baz-header"]
           .value();
   NiceMock<Envoy::StreamInfo::MockStreamInfo> stream_info;
 
-  auto transforms =
-      response_header_parser->getHeaderTransforms(stream_info, /*do_formatting=*/false);
-  EXPECT_THAT(transforms.headers_to_append_or_add,
-              ElementsAre(Pair(Http::LowerCaseString("x-foo-header"), "foo")));
-  EXPECT_THAT(transforms.headers_to_overwrite_or_add,
-              ElementsAre(Pair(Http::LowerCaseString("x-bar-header"), "bar")));
-  EXPECT_THAT(transforms.headers_to_add_if_absent,
-              ElementsAre(Pair(Http::LowerCaseString("x-per-header"), "per")));
+  {
+    auto transforms =
+        response_header_parser->getHeaderTransforms(stream_info, /*do_formatting=*/false);
+    EXPECT_THAT(transforms.headers_to_append_or_add,
+                ElementsAre(Pair(Http::LowerCaseString("x-foo-header"), "foo")));
+    EXPECT_THAT(transforms.headers_to_overwrite_or_add,
+                ElementsAre(Pair(Http::LowerCaseString("x-bar-header"), "bar")));
+    EXPECT_THAT(transforms.headers_to_add_if_absent,
+                ElementsAre(Pair(Http::LowerCaseString("x-per-header"), "per")));
 
-  EXPECT_THAT(transforms.headers_to_remove, ElementsAre(Http::LowerCaseString("x-baz-header")));
+    EXPECT_THAT(transforms.headers_to_remove, ElementsAre(Http::LowerCaseString("x-baz-header")));
+  }
+
+  {
+    auto transforms =
+        response_header_parser->getHeaderTransforms(stream_info, /*do_formatting=*/true);
+    EXPECT_THAT(transforms.headers_to_append_or_add,
+                ElementsAre(Pair(Http::LowerCaseString("x-foo-header"), "foo")));
+    EXPECT_THAT(transforms.headers_to_overwrite_or_add,
+                ElementsAre(Pair(Http::LowerCaseString("x-bar-header"), "bar")));
+    EXPECT_THAT(transforms.headers_to_add_if_absent,
+                ElementsAre(Pair(Http::LowerCaseString("x-per-header"), "per")));
+
+    EXPECT_THAT(transforms.headers_to_remove, ElementsAre(Http::LowerCaseString("x-baz-header")));
+  }
 }
 
 } // namespace

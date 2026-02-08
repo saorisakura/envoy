@@ -41,12 +41,14 @@ FIPS 140-2
 ----------
 
 BoringSSL can be built in a
-`FIPS-compliant mode <https://boringssl.googlesource.com/boringssl/+/master/crypto/fipsmodule/FIPS.md>`_,
+`FIPS-compliant mode <https://boringssl.googlesource.com/boringssl/+/main/crypto/fipsmodule/FIPS.md>`_,
 following the build instructions from the `Security Policy for BoringCrypto module
 <https://csrc.nist.gov/CSRC/media/projects/cryptographic-module-validation-program/documents/security-policies/140sp3678.pdf>`_,
-using ``--define boringssl=fips`` Bazel option. Currently, this option is only available on Linux-x86_64.
+using ``--config=boringssl-fips`` Bazel option. Currently, the BoringSSL/FIPS build will only work Linux-x86_64.
 
-The correctness of the FIPS build can be verified by checking the presence of ``BoringSSL-FIPS``
+AWS-LC FIPS can also be used with ``--config=aws-lc-fips``, and has wider architecture support.
+
+When Envoy has been built for FIPS, you should see ``BoringSSL-FIPS`` or ``AWS-LC-FIPS``
 in the :option:`--version` output.
 
 It's important to note that while using FIPS-compliant module is necessary for FIPS compliance,
@@ -114,7 +116,7 @@ Certificate selection
 ---------------------
 
 :ref:`DownstreamTlsContexts <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.DownstreamTlsContext>` support multiple TLS
-certificates. These may be a mix of RSA and P-256 ECDSA certificates for multiple server name patterns.
+certificates. These may be a mix of RSA and ECDSA certificates for multiple server name patterns.
 
 Certificate config/loading rules:
 
@@ -122,7 +124,7 @@ Certificate config/loading rules:
 * FQDN like "test.example.com" and wildcard like "\*.example.com" are valid at the same time, which will be loaded
   as two different server name patterns.
 * If multiple certificates of a particular type (RSA or ECDSA) are specified for the same name or name pattern, the first one loaded is used for that name.
-* Non-P-256 server ECDSA certificates are rejected.
+* Non-P-256, P-384 or P-521 server ECDSA certificates are rejected.
 * Static and SDS certificates may not be mixed in a given :ref:`DownstreamTlsContext
   <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.DownstreamTlsContext>`.
 
@@ -144,7 +146,7 @@ Certificate selection rules:
   is false or true.
 * Full scan execuates OCSP and key type checking on each cert which is the same as described above in exact SNI matching.
   It falls back to the first cert in the whole list if there is no cert selected.
-* Currently only two kinds of key type are supported, RSA or ECDSA. If the client supports P-256 ECDSA, the P-256 ECDSA certificate
+* Currently only two kinds of key type are supported, RSA or ECDSA. If the client supports P-256, P-384 or P-521 ECDSA, the P-256, P-384 or P-521 ECDSA certificate
   is preferred over RSA. The certificate that it falls back to might result in a failed handshake. For instance, a client only supports
   RSA certificates and the certificate only support ECDSA.
 * The final selected certificate must adhere to the OCSP policy. If no such certificate is found, the connection is refused.
@@ -190,15 +192,6 @@ Envoy will not use a must-staple certificate for new connections after its OCSP 
 
 OCSP responses are never stapled to TLS requests that do not indicate support for OCSP stapling
 via the ``status_request`` extension.
-
-The following runtime flags are provided to adjust the requirements of OCSP responses and override
-the OCSP policy. These flags default to ``true``.
-
-* ``envoy.reloadable_features.require_ocsp_response_for_must_staple_certs``: Disabling this allows
-  the operator to omit an OCSP response for must-staple certs in the config.
-* ``envoy.reloadable_features.check_ocsp_policy``: Disabling this will disable OCSP policy
-  checking. OCSP responses are stapled when available if the client supports it, even if the
-  response is expired. Stapling is skipped if no response is present.
 
 OCSP responses are ignored for :ref:`UpstreamTlsContexts
 <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.UpstreamTlsContext>`.
@@ -264,4 +257,4 @@ Common errors are:
 * ``TLSV1_ALERT_UNKNOWN_CA``: Peer certificate CA is not in trusted CA.
 
 More detailed list of error that can be raised by BoringSSL can be found
-`here <https://github.com/google/boringssl/blob/master/crypto/err/ssl.errordata>`_
+`here <https://github.com/google/boringssl/blob/main/crypto/err/ssl.errordata>`_

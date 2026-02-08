@@ -178,6 +178,21 @@ void IntegrationTcpClient::ConnectionCallbacks::onEvent(Network::ConnectionEvent
   if (event == Network::ConnectionEvent::RemoteClose) {
     parent_.disconnected_ = true;
     parent_.connection_->dispatcher().exit();
+  } else if (event == Network::ConnectionEvent::LocalClose) {
+  }
+}
+
+bool IntegrationTcpClient::waitForTcpResponse(testing::Matcher<absl::string_view> matcher,
+                                              std::chrono::milliseconds timeout) {
+  auto len = data().size();
+  while (true) {
+    if (testing::Matches(matcher)(data())) {
+      return true;
+    }
+    if (waitForData(len + 1, timeout) != testing::AssertionSuccess()) {
+      return false;
+    }
+    len = data().size();
   }
 }
 

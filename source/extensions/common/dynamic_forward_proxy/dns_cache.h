@@ -28,9 +28,6 @@ public:
   // This normalizes hostnames, respecting the port if it exists, and adding the default port
   // if there is no port.
   static std::string normalizeHostForDfp(absl::string_view host, uint16_t default_port) {
-    if (!Runtime::runtimeFeatureEnabled("envoy.reloadable_features.dfp_mixed_scheme")) {
-      return std::string(host);
-    }
     if (Envoy::Http::HeaderUtility::hostHasPort(host)) {
       return std::string(host);
     }
@@ -78,6 +75,11 @@ public:
    * This includes both success and failure details.
    */
   virtual std::string details() PURE;
+
+  /**
+   * Returns the resolution status.
+   */
+  virtual Network::DnsResolver::ResolutionStatus resolutionStatus() const PURE;
 };
 
 using DnsHostInfoSharedPtr = std::shared_ptr<DnsHostInfo>;
@@ -151,9 +153,10 @@ public:
      * Called when a host has been added or has had its address updated.
      * @param host supplies the added/updated host.
      * @param host_info supplies the associated host info.
+     * @param return supplies if the host was successfully added
      */
-    virtual void onDnsHostAddOrUpdate(const std::string& host,
-                                      const DnsHostInfoSharedPtr& host_info) PURE;
+    virtual absl::Status onDnsHostAddOrUpdate(const std::string& host,
+                                              const DnsHostInfoSharedPtr& host_info) PURE;
 
     /**
      * Called when a host has been removed.
@@ -278,6 +281,11 @@ public:
    * addresses.
    */
   virtual void setIpVersionToRemove(absl::optional<Network::Address::IpVersion> ip_version) PURE;
+
+  /**
+   * Gets the `IpVersion` addresses to be removed from the DNS response.
+   */
+  virtual absl::optional<Network::Address::IpVersion> getIpVersionToRemove() PURE;
 
   /**
    * Stops the DNS cache background tasks by canceling the pending queries and stopping the timeout

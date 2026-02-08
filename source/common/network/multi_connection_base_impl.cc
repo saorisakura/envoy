@@ -83,6 +83,16 @@ bool MultiConnectionBaseImpl::initializeReadFilters() {
   return true;
 }
 
+void MultiConnectionBaseImpl::addAccessLogHandler(AccessLog::InstanceSharedPtr handler) {
+  if (connect_finished_) {
+    connections_[0]->addAccessLogHandler(handler);
+    return;
+  }
+  // Access log handlers should only be notified of events on the final connection, so defer adding
+  // access log handlers until the final connection has been determined.
+  post_connect_state_.access_log_handlers_.push_back(handler);
+}
+
 void MultiConnectionBaseImpl::addBytesSentCallback(Connection::BytesSentCb cb) {
   if (connect_finished_) {
     connections_[0]->addBytesSentCallback(cb);
@@ -104,6 +114,17 @@ void MultiConnectionBaseImpl::enableHalfClose(bool enabled) {
 
 bool MultiConnectionBaseImpl::isHalfCloseEnabled() const {
   return connections_[0]->isHalfCloseEnabled();
+}
+
+bool MultiConnectionBaseImpl::setSocketOption(Network::SocketOptionName name,
+                                              absl::Span<uint8_t> value) {
+  bool success = true;
+  for (auto& connection : connections_) {
+    if (!connection->setSocketOption(name, value)) {
+      success = false;
+    }
+  }
+  return success;
 }
 
 std::string MultiConnectionBaseImpl::nextProtocol() const {
@@ -358,7 +379,7 @@ void MultiConnectionBaseImpl::close(ConnectionCloseType type, absl::string_view 
   connections_[0]->close(type, details);
 }
 
-DetectedCloseType MultiConnectionBaseImpl::detectedCloseType() const {
+StreamInfo::DetectedCloseType MultiConnectionBaseImpl::detectedCloseType() const {
   return connections_[0]->detectedCloseType();
 };
 
@@ -534,6 +555,9 @@ void MultiConnectionBaseImpl::setUpFinalConnection(ConnectionEvent event,
     }
     for (auto& filter : post_connect_state_.read_filters_) {
       connections_[0]->addReadFilter(filter);
+    }
+    for (auto& handler : post_connect_state_.access_log_handlers_) {
+      connections_[0]->addAccessLogHandler(handler);
     }
     if (post_connect_state_.initialize_read_filters_.has_value() &&
         post_connect_state_.initialize_read_filters_.value()) {

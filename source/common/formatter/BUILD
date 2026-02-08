@@ -18,7 +18,6 @@ envoy_cc_library(
         "http_formatter_context.h",
         "substitution_formatter.h",
     ],
-    external_deps = ["abseil_str_format"],
     deps = [
         "//envoy/api:api_interface",
         "//envoy/formatter:substitution_formatter_interface",
@@ -27,12 +26,16 @@ envoy_cc_library(
         "//source/common/http:header_map_lib",
         "//source/common/http:utility_lib",
         "//source/common/json:json_loader_lib",
+        "//source/common/json:json_streamer_lib",
+        "//source/common/json:json_utility_lib",
+        "@abseil-cpp//absl/strings:str_format",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
 
 envoy_cc_library(
     name = "substitution_format_string_lib",
+    srcs = ["substitution_format_string.cc"],
     hdrs = ["substitution_format_string.h"],
     deps = [
         ":substitution_formatter_lib",
@@ -55,7 +58,23 @@ envoy_cc_library(
         "//source/common/http:header_utility_lib",
         "//source/common/http:utility_lib",
         "//source/common/protobuf:utility_lib",
+        "//source/common/runtime:runtime_features_lib",
         "//source/common/stream_info:utility_lib",
+    ],
+)
+
+envoy_cc_library(
+    name = "coalesce_formatter_lib",
+    srcs = ["coalesce_formatter.cc"],
+    hdrs = ["coalesce_formatter.h"],
+    deps = [
+        ":substitution_format_utility_lib",
+        "//envoy/formatter:substitution_formatter_interface",
+        "//envoy/json:json_object_interface",
+        "//envoy/stream_info:stream_info_interface",
+        "//source/common/common:fmt_lib",
+        "//source/common/common:statusor_lib",
+        "//source/common/json:json_loader_lib",
     ],
 )
 
@@ -64,6 +83,7 @@ envoy_cc_library(
     srcs = ["http_specific_formatter.cc"],
     hdrs = ["http_specific_formatter.h"],
     deps = [
+        ":coalesce_formatter_lib",
         "//envoy/api:api_interface",
         "//envoy/formatter:substitution_formatter_interface",
         "//envoy/runtime:runtime_interface",
@@ -85,6 +105,7 @@ envoy_cc_library(
     name = "stream_info_formatter_extension_lib",
     srcs = ["stream_info_formatter.cc"],
     hdrs = ["stream_info_formatter.h"],
+    rbe_pool = "6gig",
     deps = [
         "//envoy/api:api_interface",
         "//envoy/formatter:substitution_formatter_interface",
@@ -98,6 +119,7 @@ envoy_cc_library(
         "//source/common/grpc:common_lib",
         "//source/common/http:utility_lib",
         "//source/common/json:json_loader_lib",
+        "//source/common/json:json_utility_lib",
         "//source/common/protobuf:message_validator_lib",
         "//source/common/stream_info:utility_lib",
     ],

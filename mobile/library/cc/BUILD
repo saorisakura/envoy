@@ -20,11 +20,11 @@ envoy_cc_library(
         "//bazel:exclude_certificates": ["-DEXCLUDE_CERTIFICATES"],
         "//conditions:default": [],
     }),
-    external_deps = ["abseil_optional"],
     repository = "@envoy",
     visibility = ["//visibility:public"],
     deps = [
         ":envoy_engine_cc_lib_no_stamp",
+        "@abseil-cpp//absl/types:optional",
         "@envoy//source/common/common:assert_lib",
         "@envoy//source/common/protobuf",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
@@ -35,6 +35,7 @@ envoy_cc_library(
         "@envoy_api//envoy/extensions/filters/http/alternate_protocols_cache/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/http/decompressor/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/http/dynamic_forward_proxy/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/filters/http/router/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/http/header_formatters/preserve_case/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/network/dns_resolver/apple/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/network/dns_resolver/getaddrinfo/v3:pkg_cc_proto",
@@ -47,6 +48,7 @@ envoy_cc_library(
         "@envoy_mobile//library/common/extensions/filters/http/local_error:filter_cc_proto",
         "@envoy_mobile//library/common/extensions/filters/http/network_configuration:filter_cc_proto",
         "@envoy_mobile//library/common/extensions/filters/http/socket_tag:filter_cc_proto",
+        "@envoy_mobile//library/common/extensions/quic_packet_writer/platform:platform_packet_writer_proto_cc_proto",
         "@envoy_mobile//library/common/types:matcher_data_lib",
     ] + select({
         "@envoy//bazel:apple": [
@@ -75,7 +77,6 @@ envoy_cc_library(
         "stream_prototype.h",
         "string_accessor.h",
     ],
-    external_deps = ["abseil_optional"],
     repository = "@envoy",
     visibility = ["//visibility:public"],
     deps = [
@@ -84,6 +85,7 @@ envoy_cc_library(
         "//library/common/api:c_types",
         "//library/common/bridge:utility_lib",
         "//library/common/extensions/key_value/platform:config",
+        "@abseil-cpp//absl/types:optional",
         "@envoy//source/common/buffer:buffer_lib",
         "@envoy//source/common/http:header_map_lib",
         "@envoy//source/common/http:utility_lib",

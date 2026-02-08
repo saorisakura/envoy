@@ -45,6 +45,7 @@ public:
   void addReadFilter(Network::ReadFilterSharedPtr filter) override;
   void removeReadFilter(Network::ReadFilterSharedPtr filter) override;
   bool initializeReadFilters() override;
+  void addAccessLogHandler(AccessLog::InstanceSharedPtr handler) override;
 
   // Network::Connection
   void addBytesSentCallback(Network::Connection::BytesSentCb /*cb*/) override {
@@ -62,8 +63,12 @@ public:
     close(type);
   }
 
-  Network::DetectedCloseType detectedCloseType() const override {
-    return Network::DetectedCloseType::Normal;
+  void closeConnection(Network::ConnectionCloseAction) override {
+    IS_ENVOY_BUG("unexpected call to closeConnection for QUIC");
+  }
+
+  StreamInfo::DetectedCloseType detectedCloseType() const override {
+    return StreamInfo::DetectedCloseType::Normal;
   }
   Event::Dispatcher& dispatcher() const override { return dispatcher_; }
   std::string nextProtocol() const override { return EMPTY_STRING; }
@@ -142,6 +147,7 @@ public:
   void configureInitialCongestionWindow(uint64_t bandwidth_bits_per_sec,
                                         std::chrono::microseconds rtt) override;
   absl::optional<uint64_t> congestionWindowInBytes() const override;
+  const Network::ConnectionSocketPtr& getSocket() const override { PANIC("not implemented"); }
 
   // Network::FilterManagerConnection
   void rawWrite(Buffer::Instance& data, bool end_stream) override;
@@ -175,6 +181,8 @@ public:
 
   void incrementSentQuicResetStreamErrorStats(quic::QuicResetStreamError error, bool from_self,
                                               bool is_upstream);
+
+  bool setSocketOption(Envoy::Network::SocketOptionName, absl::Span<uint8_t>) override;
 
 protected:
   // Propagate connection close to network_connection_callbacks_.

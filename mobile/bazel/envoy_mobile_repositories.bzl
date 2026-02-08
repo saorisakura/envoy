@@ -16,11 +16,11 @@ def envoy_mobile_repositories():
 def upstream_envoy_overrides():
     # Workaround old NDK version breakages https://github.com/envoyproxy/envoy-mobile/issues/934
     http_archive(
-        name = "com_github_libevent_libevent",
+        name = "libevent",
         urls = ["https://github.com/libevent/libevent/archive/0d7d85c2083f7a4c9efe01c061486f332b576d28.tar.gz"],
         strip_prefix = "libevent-0d7d85c2083f7a4c9efe01c061486f332b576d28",
         sha256 = "549d34065eb2485dfad6c8de638caaa6616ed130eec36dd978f73b6bdd5af113",
-        build_file_content = """filegroup(name = "all", srcs = glob(["**"]), visibility = ["//visibility:public"])""",
+        build_file_content = """filegroup(name = "libevent", srcs = glob(["**"]), visibility = ["//visibility:public"])""",
     )
 
 def swift_repos():
@@ -44,27 +44,37 @@ def swift_repos():
         url = "https://github.com/buildbuddy-io/rules_xcodeproj/releases/download/1.2.0/release.tar.gz",
     )
 
+    http_archive(
+        name = "xctestrunner",
+        urls = [
+            "https://github.com/google/xctestrunner/archive/b7698df3d435b6491b4b4c0f9fc7a63fbed5e3a6.tar.gz",
+        ],
+        strip_prefix = "xctestrunner-b7698df3d435b6491b4b4c0f9fc7a63fbed5e3a6",
+        sha256 = "ae3a063c985a8633cb7eb566db21656f8db8eb9a0edb8c182312c7f0db53730d",
+        patch_args = ["-p1"],
+        patches = ["@envoy_mobile//bazel:xctestrunner.patch"],
+    )
+
 def kotlin_repos():
     http_archive(
         name = "rules_java",
-        sha256 = "241822bf5fad614e3e1c42431002abd9af757136fa590a6a7870c6e0640a82e3",
-        strip_prefix = "rules_java-6.4.0",
-        url = "https://github.com/bazelbuild/rules_java/archive/6.4.0.tar.gz",
+        sha256 = "c0ee60f8757f140c157fc2c7af703d819514de6e025ebf70386d38bdd85fce83",
+        url = "https://github.com/bazelbuild/rules_java/releases/download/7.12.3/rules_java-7.12.3.tar.gz",
         patch_args = ["-p1"],
         patches = ["@envoy//bazel:rules_java.patch"],
     )
 
     http_archive(
         name = "rules_jvm_external",
-        sha256 = "b17d7388feb9bfa7f2fa09031b32707df529f26c91ab9e5d909eb1676badd9a6",
-        strip_prefix = "rules_jvm_external-4.5",
-        url = "https://github.com/bazelbuild/rules_jvm_external/archive/4.5.zip",
+        sha256 = "3afe5195069bd379373528899c03a3072f568d33bd96fe037bd43b1f590535e7",
+        strip_prefix = "rules_jvm_external-6.6",
+        url = "https://github.com/bazelbuild/rules_jvm_external/releases/download/6.6/rules_jvm_external-6.6.tar.gz",
     )
 
     http_archive(
-        name = "io_bazel_rules_kotlin",
-        sha256 = "01293740a16e474669aba5b5a1fe3d368de5832442f164e4fbfc566815a8bc3a",
-        urls = ["https://github.com/bazelbuild/rules_kotlin/releases/download/v1.8/rules_kotlin_release.tgz"],
+        name = "rules_kotlin",
+        sha256 = "3b772976fec7bdcda1d84b9d39b176589424c047eb2175bed09aac630e50af43",
+        urls = ["https://github.com/bazelbuild/rules_kotlin/releases/download/v1.9.6/rules_kotlin-v1.9.6.tar.gz"],
     )
 
     http_archive(
@@ -90,15 +100,21 @@ def kotlin_repos():
 
     http_archive(
         name = "robolectric",
-        sha256 = "5bcde5db598f6938c9887a140a0a1249f95d3c16274d40869503d0c322a20d5d",
-        urls = ["https://github.com/robolectric/robolectric-bazel/archive/4.8.2.tar.gz"],
-        strip_prefix = "robolectric-bazel-4.8.2",
+        sha256 = "cf04b4206b9d21b385e8dbee478fac619fc1344e8e46935dcec2d64939dd0525",
+        urls = ["https://github.com/robolectric/robolectric-bazel/releases/download/4.16/robolectric-bazel-4.16.tar.gz"],
+        strip_prefix = "robolectric-bazel-4.16",
     )
 
 def android_repos():
     http_archive(
-        name = "build_bazel_rules_android",
+        name = "rules_android",
         urls = ["https://github.com/bazelbuild/rules_android/archive/refs/tags/v0.1.1.zip"],
         sha256 = "cd06d15dd8bb59926e4d65f9003bfc20f9da4b2519985c27e190cddc8b7a7806",
         strip_prefix = "rules_android-0.1.1",
+    )
+    http_archive(
+        name = "rules_android_ndk",
+        urls = ["https://github.com/bazelbuild/rules_android_ndk/archive/v0.1.2.tar.gz"],
+        sha256 = "65aedff0cd728bee394f6fb8e65ba39c4c5efb11b29b766356922d4a74c623f5",
+        strip_prefix = "rules_android_ndk-0.1.2",
     )

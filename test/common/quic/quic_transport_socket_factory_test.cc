@@ -1,7 +1,7 @@
 #include "source/common/quic/quic_client_transport_socket_factory.h"
 #include "source/common/quic/quic_server_transport_socket_factory.h"
 
-#include "test/mocks/server/transport_socket_factory_context.h"
+#include "test/mocks/server/server_factory_context.h"
 #include "test/mocks/ssl/mocks.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/utility.h"
@@ -33,11 +33,11 @@ public:
                   .earlyDataEnabled());
   }
 
+  testing::NiceMock<ThreadLocal::MockInstance> thread_local_;
   QuicServerTransportSocketConfigFactory config_factory_;
   Stats::TestUtil::TestStore server_stats_store_;
   Api::ApiPtr server_api_;
   NiceMock<Server::Configuration::MockTransportSocketFactoryContext> context_;
-  testing::NiceMock<ThreadLocal::MockInstance> thread_local_;
 };
 
 TEST_F(QuicServerTransportSocketFactoryConfigTest, EarlyDataEnabledByDefault) {
@@ -117,42 +117,65 @@ class QuicClientTransportSocketFactoryTest : public testing::Test {
 public:
   QuicClientTransportSocketFactoryTest() {
     ON_CALL(context_.server_context_, threadLocal()).WillByDefault(ReturnRef(thread_local_));
-    EXPECT_CALL(context_.context_manager_, createSslClientContext(_, _)).WillOnce(Return(nullptr));
+  }
+
+  void initialize() {
+    EXPECT_CALL(context_.server_context_.ssl_context_manager_, createSslClientContext(_, _))
+        .WillOnce(Return(nullptr));
     EXPECT_CALL(*context_config_, setSecretUpdateCallback(_))
         .WillOnce(testing::SaveArg<0>(&update_callback_));
     factory_ = *Quic::QuicClientTransportSocketFactory::create(
         std::unique_ptr<Envoy::Ssl::ClientContextConfig>(context_config_), context_);
   }
 
+  testing::NiceMock<ThreadLocal::MockInstance> thread_local_;
   NiceMock<Server::Configuration::MockTransportSocketFactoryContext> context_;
   std::unique_ptr<Quic::QuicClientTransportSocketFactory> factory_;
   // Will be owned by factory_.
   NiceMock<Ssl::MockClientContextConfig>* context_config_{
       new NiceMock<Ssl::MockClientContextConfig>};
   std::function<void()> update_callback_;
-  testing::NiceMock<ThreadLocal::MockInstance> thread_local_;
 };
 
 TEST_F(QuicClientTransportSocketFactoryTest, SupportedAlpns) {
+  initialize();
   context_config_->alpn_ = "h3,h3-draft29";
   factory_->initialize();
   EXPECT_THAT(factory_->supportedAlpnProtocols(), testing::ElementsAre("h3", "h3-draft29"));
 }
 
+TEST_F(QuicClientTransportSocketFactoryTest, TlsCertificateSelector) {
+  class TestSelector : public Ssl::UpstreamTlsCertificateSelectorFactory {
+  public:
+    Ssl::UpstreamTlsCertificateSelectorPtr
+    createUpstreamTlsCertificateSelector(Ssl::TlsCertificateSelectorContext&) override {
+      return nullptr;
+    }
+    absl::Status onConfigUpdate() override { return absl::OkStatus(); }
+  } selector;
+  EXPECT_CALL(*context_config_, tlsCertificateSelectorFactory()).WillOnce(Invoke([&]() {
+    return makeOptRef(selector);
+  }));
+  auto factory_or_error = Quic::QuicClientTransportSocketFactory::create(
+      std::unique_ptr<Envoy::Ssl::ClientContextConfig>(context_config_), context_);
+  EXPECT_FALSE(factory_or_error.ok());
+}
+
 TEST_F(QuicClientTransportSocketFactoryTest, GetCryptoConfig) {
+  initialize();
   factory_->initialize();
   EXPECT_TRUE(factory_->supportedAlpnProtocols().empty());
   EXPECT_EQ(nullptr, factory_->getCryptoConfig());
 
   Ssl::ClientContextSharedPtr ssl_context1{new Ssl::MockClientContext()};
-  EXPECT_CALL(context_.context_manager_, createSslClientContext(_, _))
+  EXPECT_CALL(context_.server_context_.ssl_context_manager_, createSslClientContext(_, _))
       .WillOnce(Return(ssl_context1));
   update_callback_();
   std::shared_ptr<quic::QuicCryptoClientConfig> crypto_config1 = factory_->getCryptoConfig();
   EXPECT_NE(nullptr, crypto_config1);
 
   Ssl::ClientContextSharedPtr ssl_context2{new Ssl::MockClientContext()};
-  EXPECT_CALL(context_.context_manager_, createSslClientContext(_, _))
+  EXPECT_CALL(context_.server_context_.ssl_context_manager_, createSslClientContext(_, _))
       .WillOnce(Return(ssl_context2));
   update_callback_();
   std::shared_ptr<quic::QuicCryptoClientConfig> crypto_config2 = factory_->getCryptoConfig();

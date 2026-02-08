@@ -61,6 +61,9 @@ public:
   void addReadFilter(ReadFilterSharedPtr filter) override;
   void removeReadFilter(ReadFilterSharedPtr filter) override;
   bool initializeReadFilters() override;
+  void addAccessLogHandler(AccessLog::InstanceSharedPtr handler) override;
+
+  const ConnectionSocketPtr& getSocket() const override { return socket_; }
 
   // Network::Connection
   void addBytesSentCallback(BytesSentCb cb) override;
@@ -73,6 +76,7 @@ public:
     }
     close(type);
   }
+
   std::string nextProtocol() const override { return transport_socket_->protocol(); }
   void noDelay(bool enable) override;
   ReadDisableStatus readDisable(bool disable) override;
@@ -105,6 +109,7 @@ public:
   const ConnectionSocket::OptionsSharedPtr& socketOptions() const override {
     return socket_->options();
   }
+  bool setSocketOption(Network::SocketOptionName name, absl::Span<uint8_t> value) override;
   absl::string_view requestedServerName() const override { return socket_->requestedServerName(); }
   StreamInfo::StreamInfo& streamInfo() override { return stream_info_; }
   const StreamInfo::StreamInfo& streamInfo() const override { return stream_info_; }
@@ -117,6 +122,17 @@ public:
 
   // Network::FilterManagerConnection
   void rawWrite(Buffer::Instance& data, bool end_stream) override;
+  void closeConnection(ConnectionCloseAction close_action) override {
+    ASSERT(close_action.isLocalClose() || close_action.isRemoteClose());
+    if (close_action.closeSocket()) {
+      // The socket will be directly closed.
+      closeSocket(close_action.event_);
+    } else {
+      // It will go through the normal close() process.
+      ASSERT(close_action.isLocalClose());
+      closeInternal(close_action.type_);
+    }
+  }
 
   // Network::ReadBufferSource
   StreamBuffer getReadBuffer() override { return {*read_buffer_, read_end_stream_}; }
@@ -148,9 +164,17 @@ public:
 
   // ScopeTrackedObject
   void dumpState(std::ostream& os, int indent_level) const override;
-  DetectedCloseType detectedCloseType() const override { return detected_close_type_; }
+
+  StreamInfo::DetectedCloseType detectedCloseType() const override { return detected_close_type_; }
 
 protected:
+  // Indicates if the access log has been written. This is used to ensure that the access log is
+  // written exactly once, even if close() is called multiple times.
+  bool access_log_written_{false};
+
+  // Write access log if it hasn't been written yet.
+  void ensureAccessLogWritten();
+
   // A convenience function which returns true if
   // 1) The read disable count is zero or
   // 2) The read disable count is one due to the read buffer being overrun.
@@ -161,6 +185,7 @@ protected:
 
   // Network::ConnectionImplBase
   void closeConnectionImmediately() final;
+  void closeThroughFilterManager(ConnectionCloseAction close_action);
 
   void closeSocket(ConnectionEvent close_type);
 
@@ -175,6 +200,9 @@ protected:
 
   void setFailureReason(absl::string_view failure_reason);
   const std::string& failureReason() const { return failure_reason_; }
+
+  // Set the detected close type for this connection.
+  virtual void setDetectedCloseType(StreamInfo::DetectedCloseType close_type);
 
   TransportSocketPtr transport_socket_;
   ConnectionSocketPtr socket_;
@@ -214,8 +242,7 @@ private:
   // Returns true iff end of stream has been both written and read.
   bool bothSidesHalfClosed();
 
-  // Set the detected close type for this connection.
-  void setDetectedCloseType(DetectedCloseType close_type);
+  void closeInternal(ConnectionCloseType type);
 
   static std::atomic<uint64_t> next_global_id_;
 
@@ -229,7 +256,7 @@ private:
   uint64_t last_write_buffer_size_{};
   Buffer::Instance* current_write_buffer_{};
   uint32_t read_disable_count_{0};
-  DetectedCloseType detected_close_type_{DetectedCloseType::Normal};
+  StreamInfo::DetectedCloseType detected_close_type_{StreamInfo::DetectedCloseType::Normal};
   bool write_buffer_above_high_watermark_ : 1;
   bool detect_early_close_ : 1;
   bool enable_half_close_ : 1;
@@ -244,6 +271,7 @@ private:
   // read_disable_count_ == 0 to ensure that read resumption happens when remaining bytes are held
   // in transport socket internal buffers.
   bool transport_wants_read_ : 1;
+  bool enable_close_through_filter_manager_ : 1;
 };
 
 class ServerConnectionImpl : public ConnectionImpl, virtual public ServerConnection {
@@ -256,6 +284,16 @@ public:
                                         Stats::Counter& timeout_stat) override;
   void raiseEvent(ConnectionEvent event) override;
   bool initializeReadFilters() override;
+
+  void setLocalCloseReason(absl::string_view reason) override {
+    ConnectionImpl::setLocalCloseReason(reason);
+    stream_info_.setDownstreamLocalCloseReason(reason);
+  }
+
+  void setDetectedCloseType(StreamInfo::DetectedCloseType close_type) override {
+    ConnectionImpl::setDetectedCloseType(close_type);
+    stream_info_.setDownstreamDetectedCloseType(close_type);
+  }
 
 private:
   void onTransportSocketConnectTimeout();
@@ -285,8 +323,18 @@ public:
                        const Network::ConnectionSocket::OptionsSharedPtr& options,
                        const Network::TransportSocketOptionsConstSharedPtr& transport_options);
 
+  ~ClientConnectionImpl() override;
+
   // Network::ClientConnection
   void connect() override;
+
+protected:
+  void setDetectedCloseType(StreamInfo::DetectedCloseType close_type) override {
+    ConnectionImpl::setDetectedCloseType(close_type);
+    if (stream_info_.upstreamInfo() != nullptr) {
+      stream_info_.upstreamInfo()->setUpstreamDetectedCloseType(close_type);
+    }
+  }
 
 private:
   void onConnected() override;

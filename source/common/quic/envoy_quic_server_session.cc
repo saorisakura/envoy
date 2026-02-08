@@ -5,6 +5,7 @@
 #include <type_traits>
 
 #include "source/common/common/assert.h"
+#include "source/common/common/logger.h"
 #include "source/common/common/scope_tracker.h"
 #include "source/common/quic/envoy_quic_connection_debug_visitor_factory_interface.h"
 #include "source/common/quic/envoy_quic_proof_source.h"
@@ -55,7 +56,8 @@ EnvoyQuicServerSession::EnvoyQuicServerSession(
 #endif
   // If a factory is available, create a debug visitor and attach it to the connection.
   if (debug_visitor_factory.has_value()) {
-    debug_visitor_ = debug_visitor_factory->createQuicConnectionDebugVisitor(this, streamInfo());
+    debug_visitor_ =
+        debug_visitor_factory->createQuicConnectionDebugVisitor(dispatcher, *this, streamInfo());
     quic_connection_->set_debug_visitor(debug_visitor_.get());
   }
   quic_connection_->set_context_listener(
@@ -111,11 +113,6 @@ EnvoyQuicServerSession::CreateIncomingStream(quic::PendingStream* /*pending*/) {
 
 quic::QuicSpdyStream* EnvoyQuicServerSession::CreateOutgoingBidirectionalStream() {
   IS_ENVOY_BUG("Unexpected disallowed server initiated stream");
-  return nullptr;
-}
-
-quic::QuicSpdyStream* EnvoyQuicServerSession::CreateOutgoingUnidirectionalStream() {
-  IS_ENVOY_BUG("Unexpected function call");
   return nullptr;
 }
 
@@ -192,17 +189,21 @@ void EnvoyQuicServerSession::setHttp3Options(
     const uint64_t max_interval =
         PROTOBUF_GET_MS_OR_DEFAULT(http3_options_->quic_protocol_options().connection_keepalive(),
                                    max_interval, quic::kPingTimeoutSecs);
-    if (max_interval == 0) {
-      return;
-    }
-    if (initial_interval > 0) {
-      connection()->set_keep_alive_ping_timeout(
-          quic::QuicTime::Delta::FromMilliseconds(max_interval));
-      connection()->set_initial_retransmittable_on_wire_timeout(
-          quic::QuicTime::Delta::FromMilliseconds(initial_interval));
+    if (max_interval != 0) {
+      if (initial_interval > 0) {
+        connection()->set_keep_alive_ping_timeout(
+            quic::QuicTime::Delta::FromMilliseconds(max_interval));
+        connection()->set_initial_retransmittable_on_wire_timeout(
+            quic::QuicTime::Delta::FromMilliseconds(initial_interval));
+      }
     }
   }
   set_allow_extended_connect(http3_options_->allow_extended_connect());
+  if (http3_options_->disable_qpack()) {
+    DisableHuffmanEncoding();
+    DisableCookieCrumbling();
+    set_qpack_maximum_dynamic_table_capacity(0);
+  }
 }
 
 void EnvoyQuicServerSession::storeConnectionMapPosition(FilterChainToConnectionMap& connection_map,
@@ -227,6 +228,21 @@ void EnvoyQuicServerSession::ProcessUdpPacket(const quic::QuicSocketAddress& sel
   // If L4 filters causes the connection to be closed early during initialization, now
   // is the time to actually close the connection.
   maybeHandleCloseDuringInitialize();
+
+  if (should_send_go_away_and_close_on_dispatch_ != nullptr &&
+      should_send_go_away_and_close_on_dispatch_->shouldShedLoad()) {
+    ENVOY_LOG_EVERY_POW_2(info, "EnvoyQuicServerSession::ProcessUdpPacket: "
+                                "sending GOAWAY and close on dispatch");
+    SendHttp3GoAway(quic::QUIC_PEER_GOING_AWAY, "Server overloaded");
+    closeConnectionImmediately();
+  } else if (should_send_go_away_on_dispatch_ != nullptr &&
+             should_send_go_away_on_dispatch_->shouldShedLoad() && !h3_go_away_sent_) {
+    ENVOY_LOG_EVERY_POW_2(info, "EnvoyQuicServerSession::ProcessUdpPacket: "
+                                "sending GOAWAY on dispatch");
+    SendHttp3GoAway(quic::QUIC_PEER_GOING_AWAY, "Server overloaded");
+    h3_go_away_sent_ = true;
+  }
+
   quic::QuicServerSessionBase::ProcessUdpPacket(self_address, peer_address, packet);
   if (connection()->expected_server_preferred_address().IsInitialized() &&
       self_address == connection()->expected_server_preferred_address()) {

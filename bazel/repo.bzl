@@ -1,5 +1,29 @@
 # `@envoy_repo` repository rule for managing the repo and querying its metadata.
 
+CONTAINERS = """
+
+REPO = "{repo}"
+REPO_GCR = "{repo_gcr}"
+SHA = "{sha}"
+SHA_GCC = "{sha_gcc}"
+SHA_MOBILE = "{sha_mobile}"
+SHA_WORKER = "{sha_worker}"
+TAG = "{tag}"
+
+def image_gcc():
+    return "%s@sha256:%s" % (
+        REPO_GCR, SHA_GCC)
+
+def image_mobile():
+    return "%s@sha256:%s" % (
+        REPO, SHA_MOBILE)
+
+def image_worker():
+    return "%s@sha256:%s" % (
+        REPO_GCR, SHA_WORKER)
+
+"""
+
 def _envoy_repo_impl(repository_ctx):
     """This provides information about the Envoy repository
 
@@ -40,30 +64,119 @@ def _envoy_repo_impl(repository_ctx):
     ```
 
     """
+
+    # parse container information for use in RBE
+    json_result = repository_ctx.execute([
+        repository_ctx.path(repository_ctx.attr.yq),
+        repository_ctx.path(repository_ctx.attr.envoy_ci_config),
+        "-ojson",
+    ])
+    if json_result.return_code != 0:
+        fail("yq failed: {}".format(json_result.stderr))
+    repository_ctx.file("ci-config.json", json_result.stdout)
+    config_data = json.decode(repository_ctx.read("ci-config.json"))
+    repository_ctx.file("containers.bzl", CONTAINERS.format(
+        repo = config_data["build-image"]["repo"],
+        repo_gcr = config_data["build-image"]["repo-gcr"],
+        sha = config_data["build-image"]["sha"],
+        sha_gcc = config_data["build-image"]["sha-gcc"],
+        sha_mobile = config_data["build-image"]["sha-mobile"],
+        sha_worker = config_data["build-image"]["sha-worker"],
+        tag = config_data["build-image"]["tag"],
+    ))
     repo_version_path = repository_ctx.path(repository_ctx.attr.envoy_version)
     api_version_path = repository_ctx.path(repository_ctx.attr.envoy_api_version)
     version = repository_ctx.read(repo_version_path).strip()
     api_version = repository_ctx.read(api_version_path).strip()
+
+    # Read BAZEL_LLVM_PATH environment variable for local LLVM installations
+    llvm_path = repository_ctx.os.environ.get("BAZEL_LLVM_PATH", "")
+    local_llvm = "True" if llvm_path else "False"
+
+    repository_ctx.file("compiler.bzl", "LLVM_PATH = '%s'" % (llvm_path))
     repository_ctx.file("version.bzl", "VERSION = '%s'\nAPI_VERSION = '%s'" % (version, api_version))
     repository_ctx.file("path.bzl", "PATH = '%s'" % repo_version_path.dirname)
-    repository_ctx.file("__init__.py", "PATH = '%s'\nVERSION = '%s'\nAPI_VERSION = '%s'" % (repo_version_path.dirname, version, api_version))
+    repository_ctx.file("envoy_repo.py", "PATH = '%s'\nVERSION = '%s'\nAPI_VERSION = '%s'" % (repo_version_path.dirname, version, api_version))
     repository_ctx.file("WORKSPACE", "")
     repository_ctx.file("BUILD", '''
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_python//python:defs.bzl", "py_library")
-load("@envoy//tools/base:envoy_python.bzl", "envoy_entry_point")
+load("@rules_python//python/entry_points:py_console_script_binary.bzl", "py_console_script_binary")
 load("//:path.bzl", "PATH")
 
-py_library(
-    name = "envoy_repo",
-    srcs = ["__init__.py"],
+bool_flag(
+    name = "use_local_llvm_flag",
+    build_setting_default = %s,
     visibility = ["//visibility:public"],
 )
 
-envoy_entry_point(
+config_setting(
+    name = "use_local_llvm",
+    flag_values = {
+        ":use_local_llvm_flag": "True",
+    },
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "envoy_repo",
+    srcs = ["envoy_repo.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_console_script_binary(
     name = "get_project_json",
-    pkg = "envoy.base.utils",
+    pkg = "@base_pip3//envoy_base_utils",
     script = "envoy.project_data",
-    init_data = [":__init__.py"],
+    data = [":envoy_repo.py"],
+)
+
+genrule(
+    name = "generate_release_hash_bin",
+    outs = ["generate_release_hash.sh"],
+    cmd = """
+    echo "
+#!/usr/bin/env bash
+
+set -e -o pipefail
+
+git ls-remote --tags https://github.com/envoyproxy/envoy \\\\
+    | grep -E 'refs/tags/v[0-9]+\\\\.[0-9]+\\\\.[0-9]+$$' \\\\
+    | sort -u \\\\
+    | sha256sum \\\\
+    | cut -d ' ' -f 1" > $@
+    chmod +x $@
+    """
+)
+
+sh_binary(
+    name = "generate_release_hash",
+    srcs = [":generate_release_hash_bin"],
+    visibility = ["//visibility:public"],
+)
+
+# This sets a default hash based on currently visible tagged versions.
+# Its very questionably hermetic, making assumptions about git, the repo remotes and so on.
+# The general idea here is to make this cache blow any time there are release changes.
+# You can use the above sh_binary to generate a custom/correct hash to override below.
+genrule(
+    name = "default_release_hash",
+    outs = ["default_release_hash.txt"],
+    cmd = """
+    $(location :generate_release_hash) > $@
+    """,
+    stamp = True,
+    tags = ["no-remote-exec"],
+    tools = [":generate_release_hash"],
+)
+
+label_flag(
+    name = "release-hash",
+    build_setting_default = ":default_release_hash",
+    visibility = ["//visibility:public"],
 )
 
 genrule(
@@ -74,77 +187,83 @@ genrule(
     """,
     tools = [
         ":get_project_json",
+        ":release-hash",
         "@envoy//:VERSION.txt",
         "@envoy//changelogs",
     ],
     visibility = ["//visibility:public"],
 )
 
-envoy_entry_point(
+py_console_script_binary(
     name = "release",
     args = [
         "release",
         PATH,
         "--release-message-path=$(location @envoy//changelogs:summary)",
     ],
-    data = ["@envoy//changelogs:summary"],
-    pkg = "envoy.base.utils",
+    data = [
+        ":envoy_repo.py",
+        "@envoy//changelogs:summary",
+    ],
+    pkg = "@base_pip3//envoy_base_utils",
     script = "envoy.project",
-    init_data = [":__init__.py"],
 )
 
-envoy_entry_point(
+py_console_script_binary(
     name = "dev",
     args = [
         "dev",
         PATH,
     ],
-    pkg = "envoy.base.utils",
+    pkg = "@base_pip3//envoy_base_utils",
     script = "envoy.project",
-    init_data = [":__init__.py"],
+    data = [":envoy_repo.py"],
 )
 
-envoy_entry_point(
+py_console_script_binary(
     name = "sync",
     args = [
         "sync",
         PATH,
     ],
-    pkg = "envoy.base.utils",
+    pkg = "@base_pip3//envoy_base_utils",
     script = "envoy.project",
-    init_data = [":__init__.py"],
+    data = [":envoy_repo.py"],
 )
 
-envoy_entry_point(
+py_console_script_binary(
     name = "publish",
     args = [
         "publish",
         PATH,
     ],
-    pkg = "envoy.base.utils",
+    pkg = "@base_pip3//envoy_base_utils",
     script = "envoy.project",
-    init_data = [":__init__.py"],
+    data = [":envoy_repo.py"],
 )
 
-envoy_entry_point(
+py_console_script_binary(
     name = "trigger",
     args = [
         "trigger",
         PATH,
     ],
-    pkg = "envoy.base.utils",
+    pkg = "@base_pip3//envoy_base_utils",
     script = "envoy.project",
-    init_data = [":__init__.py"],
+    data = [":envoy_repo.py"],
 )
 
-''')
+''' % local_llvm)
 
 _envoy_repo = repository_rule(
     implementation = _envoy_repo_impl,
     attrs = {
         "envoy_version": attr.label(default = "@envoy//:VERSION.txt"),
         "envoy_api_version": attr.label(default = "@envoy//:API_VERSION.txt"),
+        "envoy_ci_config": attr.label(default = "@envoy//:.github/config.yml"),
+        "yq": attr.label(default = "@yq"),
     },
+    environ = ["BAZEL_LLVM_PATH"],
 )
 
 def envoy_repo():

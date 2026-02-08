@@ -37,9 +37,6 @@ envoy_cc_library(
         # equivalents of std::string_view and std::optional.
         "-DDD_USE_ABSEIL_FOR_ENVOY",
     ],
-    external_deps = [
-        "dd_trace_cpp",
-    ],
     deps = [
         "//source/common/config:utility_lib",
         "//source/common/http:async_client_utility_lib",
@@ -51,6 +48,8 @@ envoy_cc_library(
         "//source/common/upstream:cluster_update_tracker_lib",
         "//source/common/version:version_lib",
         "//source/extensions/tracers/common:factory_base_lib",
+        "@dd-trace-cpp//:dd_trace_cpp",
+        "@nlohmann_json//:json",
     ],
 )
 

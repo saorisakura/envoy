@@ -34,13 +34,11 @@ envoy_cc_contrib_extension(
 envoy_cc_library(
     name = "tra_client_interface",
     hdrs = ["tra.h"],
-    external_deps = [
-        "abseil_optional",
-        "abseil_any",
-    ],
     deps = [
         "//envoy/singleton:manager_interface",
         "//envoy/tracing:tracer_interface",
         "//source/common/stats:symbol_table_lib",
+        "@abseil-cpp//absl/types:any",
+        "@abseil-cpp//absl/types:optional",
     ],
 )

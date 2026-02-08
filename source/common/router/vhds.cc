@@ -24,24 +24,48 @@ absl::StatusOr<VhdsSubscriptionPtr> VhdsSubscription::createVhdsSubscription(
     RouteConfigUpdatePtr& config_update_info,
     Server::Configuration::ServerFactoryContext& factory_context, const std::string& stat_prefix,
     Rds::RouteConfigProvider* route_config_provider) {
-  const auto& config_source = config_update_info->protobufConfigurationCast()
-                                  .vhds()
-                                  .config_source()
-                                  .api_config_source()
-                                  .api_type();
-  if (config_source != envoy::config::core::v3::ApiConfigSource::DELTA_GRPC) {
-    return absl::InvalidArgumentError("vhds: only 'DELTA_GRPC' is supported as an api_type.");
+  const auto& vhds_config_source =
+      config_update_info->protobufConfigurationCast().vhds().config_source();
+  // VHDS only supports Delta xDS. This can be specified either explicitly via DELTA_GRPC
+  // or implicitly by using ADS when the parent ADS stream is in Delta mode.
+  const bool is_ads = vhds_config_source.config_source_specifier_case() ==
+                      envoy::config::core::v3::ConfigSource::ConfigSourceSpecifierCase::kAds;
+  const bool is_delta_grpc = vhds_config_source.has_api_config_source() &&
+                             vhds_config_source.api_config_source().api_type() ==
+                                 envoy::config::core::v3::ApiConfigSource::DELTA_GRPC;
+
+  if (!is_ads && !is_delta_grpc) {
+    return absl::InvalidArgumentError(
+        "vhds: only 'DELTA_GRPC' or 'ADS' (which uses Delta xDS) is supported as a config source.");
   }
 
-  return std::unique_ptr<VhdsSubscription>(new VhdsSubscription(
-      config_update_info, factory_context, stat_prefix, route_config_provider));
+  // If using ADS, verify the parent ADS stream is in Delta mode
+  if (is_ads) {
+    const auto& bootstrap = factory_context.bootstrap();
+    if (!bootstrap.has_dynamic_resources() || !bootstrap.dynamic_resources().has_ads_config()) {
+      return absl::InvalidArgumentError(
+          "vhds: ADS config source specified but no ADS configured in bootstrap.");
+    }
+    const auto& ads_config = bootstrap.dynamic_resources().ads_config();
+    if (ads_config.api_type() != envoy::config::core::v3::ApiConfigSource::DELTA_GRPC) {
+      return absl::InvalidArgumentError(
+          "vhds: ADS must use DELTA_GRPC api_type when used as VHDS config source.");
+    }
+  }
+
+  auto status = absl::OkStatus();
+  auto ret = std::unique_ptr<VhdsSubscription>(new VhdsSubscription(
+      config_update_info, factory_context, stat_prefix, route_config_provider, status));
+  RETURN_IF_ERROR(status);
+  return ret;
 }
 
 // Implements callbacks to handle DeltaDiscovery protocol for VirtualHostDiscoveryService
 VhdsSubscription::VhdsSubscription(RouteConfigUpdatePtr& config_update_info,
                                    Server::Configuration::ServerFactoryContext& factory_context,
                                    const std::string& stat_prefix,
-                                   Rds::RouteConfigProvider* route_config_provider)
+                                   Rds::RouteConfigProvider* route_config_provider,
+                                   absl::Status& status)
     : Envoy::Config::SubscriptionBase<envoy::config::route::v3::VirtualHost>(
           factory_context.messageValidationContext().dynamicValidationVisitor(), "name"),
       config_update_info_(config_update_info),
@@ -58,11 +82,12 @@ VhdsSubscription::VhdsSubscription(RouteConfigUpdatePtr& config_update_info,
   const auto resource_name = getResourceName();
   Envoy::Config::SubscriptionOptions options;
   options.use_namespace_matching_ = true;
-  subscription_ = THROW_OR_RETURN_VALUE(
+  absl::StatusOr<Envoy::Config::SubscriptionPtr> status_or =
       factory_context.clusterManager().subscriptionFactory().subscriptionFromConfigSource(
           config_update_info_->protobufConfigurationCast().vhds().config_source(),
-          Grpc::Common::typeUrl(resource_name), *scope_, *this, resource_decoder_, options),
-      Envoy::Config::SubscriptionPtr);
+          Grpc::Common::typeUrl(resource_name), *scope_, *this, resource_decoder_, options);
+  SET_AND_RETURN_IF_NOT_OK(status_or.status(), status);
+  subscription_ = std::move(status_or.value());
 }
 
 void VhdsSubscription::updateOnDemand(const std::string& with_route_config_name_prefix) {
@@ -95,8 +120,8 @@ absl::Status VhdsSubscription::onConfigUpdate(
     added_vhosts.emplace_back(
         dynamic_cast<const envoy::config::route::v3::VirtualHost&>(resource.get().resource()));
   }
-  if (config_update_info_->onVhdsUpdate(added_vhosts, added_resource_ids, removed_resources,
-                                        version_info)) {
+  if (config_update_info_->onVhdsUpdate(added_vhosts, std::move(added_resource_ids),
+                                        removed_resources, version_info)) {
     stats_.config_reload_.inc();
     ENVOY_LOG(debug, "vhds: loading new configuration: config_name={} hash={}",
               config_update_info_->protobufConfigurationCast().name(),

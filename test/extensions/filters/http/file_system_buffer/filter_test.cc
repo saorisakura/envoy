@@ -23,6 +23,7 @@ using Extensions::Common::AsyncFiles::MockAsyncFileManager;
 using Extensions::Common::AsyncFiles::MockAsyncFileManagerFactory;
 using ::testing::NiceMock;
 using ::testing::Return;
+using ::testing::ReturnRef;
 
 class FileSystemBufferFilterTest : public testing::Test {
 public:
@@ -42,8 +43,9 @@ public:
 
 protected:
   void expectAsyncFileCreated() {
-    EXPECT_CALL(*mock_async_file_manager_, createAnonymousFile(_, _));
+    EXPECT_CALL(*mock_async_file_manager_, createAnonymousFile(_, _, _));
   }
+  void pumpDispatcher() { dispatcher_->run(Event::Dispatcher::RunType::Block); }
   // A file is only opened by the filter if it's going to chain a write immediately afterwards,
   // so we combine completing the open and expecting the write, which allows for simplified control
   // of the handle.
@@ -56,13 +58,13 @@ protected:
   }
   void expectWriteWithPosition(MockAsyncFileHandle handle, absl::string_view content,
                                off_t offset) {
-    EXPECT_CALL(*handle, write(BufferStringEqual(std::string(content)), offset, _));
+    EXPECT_CALL(*handle, write(_, BufferStringEqual(std::string(content)), offset, _));
   }
   void completeWriteOfSize(size_t length) {
     mock_async_file_manager_->nextActionCompletes(absl::StatusOr<size_t>{length});
   }
   void expectRead(MockAsyncFileHandle handle, off_t offset, size_t size) {
-    EXPECT_CALL(*handle, read(offset, size, _));
+    EXPECT_CALL(*handle, read(_, offset, size, _));
   }
   void completeRead(absl::string_view content) {
     mock_async_file_manager_->nextActionCompletes(absl::StatusOr<std::unique_ptr<Buffer::Instance>>{
@@ -86,6 +88,10 @@ protected:
                                                           proto_config);
   }
 
+  void useDeferredDispatcher() {
+    EXPECT_CALL(decoder_callbacks_, dispatcher()).WillRepeatedly(ReturnRef(*dispatcher_));
+  }
+
   void createFilterFromYaml(absl::string_view yaml) {
     auto config = configFromYaml(yaml);
     filter_ = std::make_shared<FileSystemBufferFilter>(config);
@@ -104,14 +110,6 @@ protected:
     ON_CALL(encoder_callbacks_, continueEncoding()).WillByDefault([this]() {
       ASSERT_FALSE(continued_encoding_);
       continued_encoding_ = true;
-    });
-    // Using EXPECT_CALL rather than ON_CALL because this one was set up in Envoy code and
-    // isn't a NiceMock. Using EXPECT reduces log noise.
-    // For simplicity's sake the dispatcher just runs the function immediately
-    // - since the mock is capturing callbacks, we're effectively triggering
-    // the dispatcher when we resolve the callback.
-    EXPECT_CALL(decoder_callbacks_.dispatcher_, post(_)).WillRepeatedly([](Event::PostCb fn) {
-      fn();
     });
     filter_->setDecoderFilterCallbacks(decoder_callbacks_);
     filter_->setEncoderFilterCallbacks(encoder_callbacks_);
@@ -154,6 +152,8 @@ protected:
   bool continued_encoding_ = false;
   int request_source_watermark_ = 0;
   int response_source_watermark_ = 0;
+  Api::ApiPtr api_ = Api::createApiForTest();
+  Event::DispatcherPtr dispatcher_ = api_->allocateDispatcher("test_thread");
   LogLevelSetter log_level_setter_ = LogLevelSetter(ENVOY_SPDLOG_LEVEL(debug));
 };
 
@@ -234,6 +234,11 @@ TEST_F(FileSystemBufferFilterTest, BuffersEntireRequestAndReplacesContentLength)
   Buffer::OwnedImpl data2(" banana");
   EXPECT_EQ(Http::FilterDataStatus::StopIterationNoBuffer, filter_->decodeData(data1, false));
   EXPECT_EQ(request_sent_on_, "");
+  testing::InSequence s;
+  EXPECT_CALL(decoder_callbacks_, injectDecodedDataToFilterChain(_, false))
+      .WillOnce([this](Buffer::Instance& out, bool) { request_sent_on_ += out.toString(); });
+  EXPECT_CALL(decoder_callbacks_, injectDecodedDataToFilterChain(_, true))
+      .WillOnce([this](Buffer::Instance& out, bool) { request_sent_on_ += out.toString(); });
   EXPECT_EQ(Http::FilterDataStatus::StopIterationNoBuffer, filter_->decodeData(data2, true));
   EXPECT_EQ(request_headers_.getContentLengthValue(), "12");
   EXPECT_EQ(request_sent_on_, "hello banana");
@@ -255,6 +260,11 @@ TEST_F(FileSystemBufferFilterTest, BuffersEntireResponseAndReplacesContentLength
   Buffer::OwnedImpl data2(" banana");
   EXPECT_EQ(Http::FilterDataStatus::StopIterationNoBuffer, filter_->encodeData(data1, false));
   EXPECT_EQ(response_sent_on_, "");
+  testing::InSequence s;
+  EXPECT_CALL(encoder_callbacks_, injectEncodedDataToFilterChain(_, false))
+      .WillOnce([this](Buffer::Instance& out, bool) { response_sent_on_ += out.toString(); });
+  EXPECT_CALL(encoder_callbacks_, injectEncodedDataToFilterChain(_, true))
+      .WillOnce([this](Buffer::Instance& out, bool) { response_sent_on_ += out.toString(); });
   EXPECT_EQ(Http::FilterDataStatus::StopIterationNoBuffer, filter_->encodeData(data2, true));
   EXPECT_EQ(response_headers_.getContentLengthValue(), "12");
   EXPECT_EQ(response_sent_on_, "hello banana");
@@ -573,6 +583,8 @@ TEST_F(FileSystemBufferFilterTest, RequestTrailersArePostponedUntilStreamComplet
             filter_->decodeData(request_body, false));
   EXPECT_EQ("", request_sent_on_);
   EXPECT_FALSE(continued_decoding_);
+  EXPECT_CALL(decoder_callbacks_, injectDecodedDataToFilterChain(_, false))
+      .WillOnce([this](Buffer::Instance& out, bool) { request_sent_on_ += out.toString(); });
   EXPECT_EQ(Http::FilterTrailersStatus::StopIteration, filter_->decodeTrailers(request_trailers_));
   EXPECT_EQ("hello", request_sent_on_);
   EXPECT_TRUE(continued_decoding_);
@@ -595,6 +607,8 @@ TEST_F(FileSystemBufferFilterTest, ResponseTrailersArePostponedUntilStreamComple
             filter_->encodeData(response_body, false));
   EXPECT_EQ("", response_sent_on_);
   EXPECT_FALSE(continued_encoding_);
+  EXPECT_CALL(encoder_callbacks_, injectEncodedDataToFilterChain(_, false))
+      .WillOnce([this](Buffer::Instance& out, bool) { response_sent_on_ += out.toString(); });
   EXPECT_EQ(Http::FilterTrailersStatus::StopIteration, filter_->encodeTrailers(response_trailers_));
   EXPECT_EQ("hello", response_sent_on_);
   EXPECT_TRUE(continued_encoding_);
@@ -738,26 +752,23 @@ TEST_F(FileSystemBufferFilterTest, FilterDestroyedWhileFileActionIsInDispatcherI
       behavior:
         fully_buffer: {}
   )");
+  useDeferredDispatcher();
   EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,
             filter_->decodeHeaders(request_headers_, false));
+  pumpDispatcher();
   expectAsyncFileCreated();
   Buffer::OwnedImpl request_body{"12345678901234567890"};
   EXPECT_EQ(Http::FilterDataStatus::StopIterationNoBuffer,
             filter_->decodeData(request_body, false));
+  pumpDispatcher();
   completeCreateFileAndExpectWrite("1234567890");
-  Event::PostCb intercepted_dispatcher_callback;
-  // Our default mock dispatcher behavior calls the callback immediately - here we intercept
-  // one so we can call it after a 'realistic' delay during which something else happened to
-  // destroy the filter.
-  EXPECT_CALL(decoder_callbacks_.dispatcher_, post(_))
-      .WillOnce([&intercepted_dispatcher_callback](Event::PostCb fn) {
-        intercepted_dispatcher_callback = std::move(fn);
-      });
+  pumpDispatcher();
+  // Action completes in file system manager. Don't consume the dispatched callback yet.
   completeWriteOfSize(10);
+  // Action is cancelled before callback; async file manager prevents the callback after this.
+  EXPECT_CALL(*mock_async_file_manager_, mockCancel());
   destroyFilter();
-  // Callback called from dispatcher after filter was destroyed and its pointer invalidated,
-  // should not cause a crash.
-  intercepted_dispatcher_callback();
+  pumpDispatcher();
 }
 
 TEST_F(FileSystemBufferFilterTest, MergesRouteConfig) {
@@ -774,13 +785,11 @@ TEST_F(FileSystemBufferFilterTest, MergesRouteConfig) {
   )");
   auto mock_route = std::make_shared<Router::MockRoute>();
   EXPECT_CALL(decoder_callbacks_, route()).WillOnce(Return(mock_route));
-  EXPECT_CALL(*mock_route, traversePerFilterConfig(_, _))
-      .WillOnce([vhost_config, route_config](
-                    const std::string&,
-                    std::function<void(const Router::RouteSpecificFilterConfig&)> add_config) {
-        add_config(*vhost_config);
-        add_config(*route_config);
-      });
+  EXPECT_CALL(*mock_route, perFilterConfigs(_))
+      .WillOnce(
+          [vhost_config, route_config](absl::string_view) -> Router::RouteSpecificFilterConfigs {
+            return {vhost_config.get(), route_config.get()};
+          });
   // The default config would return Continue, so these returning StopIteration shows that
   // both route_configs were applied.
   EXPECT_EQ(Http::FilterHeadersStatus::StopIteration,

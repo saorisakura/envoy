@@ -25,7 +25,7 @@
 #include "test/mocks/network/mocks.h"
 #include "test/mocks/runtime/mocks.h"
 #include "test/mocks/server/instance.h"
-#include "test/mocks/server/server_factory_context.h"
+#include "test/mocks/server/listener_factory_context.h"
 #include "test/mocks/ssl/mocks.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/network_utility.h"
@@ -89,9 +89,8 @@ protected:
     return std::make_unique<TestActiveQuicListener>(
         runtime, worker_index, concurrency, dispatcher, parent, std::move(listen_socket),
         listener_config, quic_config, kernel_worker_routing, enabled, quic_stat_names,
-        packets_to_read_to_connection_count_ratio, /*receive_ecn=*/true,
-        crypto_server_stream_factory, proof_source_factory, std::move(cid_generator),
-        testWorkerSelector, std::nullopt);
+        packets_to_read_to_connection_count_ratio, crypto_server_stream_factory,
+        proof_source_factory, std::move(cid_generator), testWorkerSelector, std::nullopt);
   }
 };
 
@@ -108,6 +107,10 @@ public:
   static bool enabled(ActiveQuicListener& listener) { return listener.enabled_->enabled(); }
 
   static Network::Socket& socket(ActiveQuicListener& listener) { return listener.listen_socket_; }
+
+  static uint32_t getMaxSessionsPerEventLoop(ActiveQuicListener& listener) {
+    return listener.max_sessions_per_event_loop_;
+  }
 };
 
 class ActiveQuicListenerFactoryPeer {
@@ -118,7 +121,7 @@ public:
   }
   static EnvoyQuicConnectionDebugVisitorFactoryInterfaceOptRef
   debugVisitorFactory(ActiveQuicListenerFactory* factory) {
-    return factory->connection_debug_visitor_factory_;
+    return makeOptRefFromPtr(factory->connection_debug_visitor_factory_.get());
   }
 };
 
@@ -131,7 +134,7 @@ protected:
         connection_handler_(*dispatcher_, absl::nullopt),
         transport_socket_factory_(*Quic::QuicServerTransportSocketFactory::create(
             true, *store_.rootScope(), std::make_unique<NiceMock<Ssl::MockServerContextConfig>>(),
-            ssl_context_manager_, {})),
+            ssl_context_manager_)),
         quic_version_(quic::CurrentSupportedHttp3Versions()[0]),
         quic_stat_names_(listener_config_.listenerScope().symbolTable()) {}
 
@@ -141,7 +144,6 @@ protected:
   }
 
   void SetUp() override {
-    Runtime::maybeSetRuntimeGuard("envoy.reloadable_features.quic_receive_ecn", true);
     envoy::config::bootstrap::v3::LayeredRuntime config;
     config.add_layers()->mutable_admin_layer();
     listen_socket_ =
@@ -161,9 +163,10 @@ protected:
         .WillByDefault(Return(Network::UdpListenerConfigOptRef(udp_listener_config_)));
     ON_CALL(udp_listener_config_, packetWriterFactory())
         .WillByDefault(ReturnRef(udp_packet_writer_factory_));
-    ON_CALL(udp_packet_writer_factory_, createUdpPacketWriter(_, _))
-        .WillByDefault(Invoke(
-            [&](Network::IoHandle& io_handle, Stats::Scope& scope) -> Network::UdpPacketWriterPtr {
+    ON_CALL(udp_packet_writer_factory_, createUdpPacketWriter(_, _, _, _))
+        .WillByDefault(
+            Invoke([&](Network::IoHandle& io_handle, Stats::Scope& scope, Envoy::Event::Dispatcher&,
+                       absl::AnyInvocable<void()&&>) -> Network::UdpPacketWriterPtr {
 #if UDP_GSO_BATCH_WRITER_COMPILETIME_SUPPORT
               return std::make_unique<Quic::UdpGsoBatchWriter>(io_handle, scope);
 #else
@@ -224,10 +227,6 @@ protected:
           Server::Configuration::FilterChainUtility::buildFilterChain(connection, filter_factories);
           return true;
         }));
-    if (!quic_version_.UsesTls()) {
-      EXPECT_CALL(network_connection_callbacks_, onEvent(Network::ConnectionEvent::Connected))
-          .Times(connection_count);
-    }
     EXPECT_CALL(network_connection_callbacks_, onEvent(Network::ConnectionEvent::LocalClose))
         .Times(connection_count);
 
@@ -365,7 +364,7 @@ protected:
                        handshake_timeout_);
   }
 
-  testing::NiceMock<Server::Configuration::MockServerFactoryContext> context_;
+  testing::NiceMock<Server::Configuration::MockListenerFactoryContext> context_;
   TestScopedRuntime scoped_runtime_;
   Network::Address::IpVersion version_;
   Event::SimulatedTimeSystemHelper simulated_time_system_;
@@ -647,7 +646,6 @@ TEST_P(ActiveQuicListenerTest, EcnReportingIsEnabled) {
 }
 
 TEST_P(ActiveQuicListenerTest, EcnReporting) {
-  Runtime::maybeSetRuntimeGuard("envoy.reloadable_features.quic_receive_ecn", true);
   initialize();
   maybeConfigureMocks(/* connection_count = */ 1);
   quic::QuicConnectionId connection_id = quic::test::TestConnectionId(1);
@@ -665,7 +663,6 @@ TEST_P(ActiveQuicListenerTest, EcnReportingDualStack) {
   if (local_address_->ip()->version() == Network::Address::IpVersion::v4) {
     return;
   }
-  Runtime::maybeSetRuntimeGuard("envoy.reloadable_features.quic_receive_ecn", true);
   initialize();
   maybeConfigureMocks(/* connection_count = */ 1);
   quic::QuicConnectionId connection_id = quic::test::TestConnectionId(1);
@@ -677,6 +674,23 @@ TEST_P(ActiveQuicListenerTest, EcnReportingDualStack) {
   ASSERT(connection != nullptr);
   const quic::QuicConnectionStats& stats = connection->GetStats();
   EXPECT_EQ(stats.num_ecn_marks_received.ect1, 1);
+}
+
+TEST_P(ActiveQuicListenerTest, MaxSessionsPerEventLoopNotConfigured) {
+  initialize();
+  EXPECT_EQ(ActiveQuicListener::kNumSessionsToCreatePerLoop,
+            ActiveQuicListenerPeer::getMaxSessionsPerEventLoop(*quic_listener_));
+}
+
+TEST_P(ActiveQuicListenerTest, MaxSessionsPerEventLoopConfigured) {
+  const uint32_t max_sessions_per_event_loop = 2;
+  envoy::config::listener::v3::UdpListenerConfig udp_listener_config;
+  udp_listener_config.mutable_quic_options()->mutable_max_sessions_per_event_loop()->set_value(
+      max_sessions_per_event_loop);
+  ON_CALL(udp_listener_config_, config()).WillByDefault(ReturnRef(udp_listener_config));
+  initialize();
+  EXPECT_EQ(max_sessions_per_event_loop,
+            ActiveQuicListenerPeer::getMaxSessionsPerEventLoop(*quic_listener_));
 }
 
 class ActiveQuicListenerEmptyFlagConfigTest : public ActiveQuicListenerTest {
@@ -727,13 +741,13 @@ protected:
   std::unique_ptr<ActiveQuicListenerFactory>
   createQuicListenerFactory(envoy::config::listener::v3::QuicProtocolOptions options) {
     return std::make_unique<ActiveQuicListenerFactory>(options, /*concurrency=*/1, quic_stat_names_,
-                                                       validation_visitor_, server_context_);
+                                                       validation_visitor_, listener_context_);
   }
 
   Stats::SymbolTable symbol_table_;
   QuicStatNames quic_stat_names_ = QuicStatNames(symbol_table_);
   NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor_;
-  testing::NiceMock<Server::Configuration::MockServerFactoryContext> server_context_;
+  testing::NiceMock<Server::Configuration::MockListenerFactoryContext> listener_context_;
 };
 
 TEST_F(ActiveQuicListenerFactoryTest, NoDebugVisitorConfigured) {
@@ -743,10 +757,6 @@ TEST_F(ActiveQuicListenerFactoryTest, NoDebugVisitorConfigured) {
 }
 
 TEST_F(ActiveQuicListenerFactoryTest, DebugVisitorConfigured) {
-  TestProcessObject test_process_object;
-  ProcessContextImpl context(test_process_object);
-  EXPECT_CALL(server_context_, processContext())
-      .WillRepeatedly(Return(ProcessContextOptRef(context)));
   envoy::config::listener::v3::QuicProtocolOptions quic_config;
   quic_config.mutable_connection_debug_visitor_config()->set_name(
       "envoy.quic.connection_debug_visitor.mock");
@@ -756,10 +766,6 @@ TEST_F(ActiveQuicListenerFactoryTest, DebugVisitorConfigured) {
   auto debug_visitor_factory =
       ActiveQuicListenerFactoryPeer::debugVisitorFactory(listener_factory.get());
   EXPECT_TRUE(debug_visitor_factory.has_value());
-  auto test_debug_visitor_factory =
-      dynamic_cast<TestEnvoyQuicConnectionDebugVisitorFactory*>(debug_visitor_factory.ptr());
-  EXPECT_TRUE(test_debug_visitor_factory->processContext().has_value());
-  EXPECT_EQ(&test_debug_visitor_factory->processContext().value().get(), &context);
 }
 
 } // namespace Quic

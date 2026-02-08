@@ -26,15 +26,27 @@ envoy_cc_library(
 )
 
 envoy_cc_library(
+    name = "stat_match_input_lib",
+    srcs = ["stat_match_input.cc"],
+    hdrs = ["stat_match_input.h"],
+    deps = [
+        ":stats_matcher_lib",
+        "//envoy/registry",
+        "//envoy/stats:stats_interface",
+        "@envoy_api//envoy/extensions/matching/common_inputs/stats/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_library(
     name = "custom_stat_namespaces_lib",
     srcs = ["custom_stat_namespaces_impl.cc"],
     hdrs = ["custom_stat_namespaces_impl.h"],
-    external_deps = ["abseil_flat_hash_set"],
     deps = [
         "//envoy/stats:custom_stat_namespaces_interface",
         "//source/common/common:assert_lib",
         "//source/common/common:macros",
         "//source/common/common:thread_lib",
+        "@abseil-cpp//absl/container:flat_hash_set",
     ],
 )
 
@@ -54,16 +66,15 @@ envoy_cc_library(
     name = "histogram_lib",
     srcs = ["histogram_impl.cc"],
     hdrs = ["histogram_impl.h"],
-    external_deps = [
-        "libcircllhist",
-    ],
     deps = [
         ":metric_impl_lib",
         "//source/common/common:assert_lib",
         "//source/common/common:hash_lib",
         "//source/common/common:matchers_lib",
         "//source/common/common:utility_lib",
+        "//source/common/protobuf:utility_lib",
         "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
+        "@libcircllhist",
     ],
 )
 
@@ -181,10 +192,6 @@ envoy_cc_library(
     name = "symbol_table_lib",
     srcs = ["symbol_table.cc"],
     hdrs = ["symbol_table.h"],
-    external_deps = [
-        "abseil_base",
-        "abseil_inlined_vector",
-    ],
     deps = [
         ":recent_lookups_lib",
         "//source/common/common:assert_lib",
@@ -192,6 +199,8 @@ envoy_cc_library(
         "//source/common/common:minimal_logger_lib",
         "//source/common/common:thread_lib",
         "//source/common/common:utility_lib",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/container:inlined_vector",
     ],
 )
 
@@ -211,7 +220,6 @@ envoy_cc_library(
     name = "tag_producer_lib",
     srcs = ["tag_producer_impl.cc"],
     hdrs = ["tag_producer_impl.h"],
-    external_deps = ["abseil_node_hash_set"],
     deps = [
         ":symbol_table_lib",
         ":tag_extractor_lib",
@@ -220,6 +228,7 @@ envoy_cc_library(
         "//source/common/common:perf_annotation_lib",
         "//source/common/config:well_known_names",
         "//source/common/protobuf",
+        "@abseil-cpp//absl/container:node_hash_set",
         "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
     ],
 )

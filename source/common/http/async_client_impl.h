@@ -38,6 +38,7 @@
 #include "source/common/common/linked_object.h"
 #include "source/common/http/message_impl.h"
 #include "source/common/http/null_route_impl.h"
+#include "source/common/local_reply/local_reply.h"
 #include "source/common/router/config_impl.h"
 #include "source/common/router/router.h"
 #include "source/common/stream_info/stream_info_impl.h"
@@ -50,7 +51,7 @@ namespace Http {
 namespace {
 // Limit the size of buffer for data used for retries.
 // This is currently fixed to 64KB.
-constexpr uint64_t kBufferLimitForRetry = 1 << 16;
+constexpr uint64_t kDefaultDecoderBufferLimit = 1 << 16;
 // Response buffer limit 32MB.
 constexpr uint64_t kBufferLimitForResponse = 32 * 1024 * 1024;
 } // namespace
@@ -83,7 +84,7 @@ private:
   const Router::FilterConfigSharedPtr config_;
   Event::Dispatcher& dispatcher_;
   std::list<std::unique_ptr<AsyncStreamImpl>> active_streams_;
-  Runtime::Loader& runtime_;
+  const LocalReply::LocalReplyPtr local_reply_;
 
   friend class AsyncStreamImpl;
   friend class AsyncRequestSharedImpl;
@@ -104,12 +105,14 @@ public:
   create(AsyncClientImpl& parent, AsyncClient::StreamCallbacks& callbacks,
          const AsyncClient::StreamOptions& options) {
     absl::Status creation_status = absl::OkStatus();
-    return std::unique_ptr<AsyncStreamImpl>(
+    std::unique_ptr<AsyncStreamImpl> stream = std::unique_ptr<AsyncStreamImpl>(
         new AsyncStreamImpl(parent, callbacks, options, creation_status));
+    RETURN_IF_NOT_OK(creation_status);
+    return stream;
   }
 
   ~AsyncStreamImpl() override {
-    router_.onDestroy();
+    routerDestroy();
     // UpstreamRequest::cleanUp() is guaranteed to reset the high watermark calls.
     ENVOY_BUG(high_watermark_calls_ == 0, "Excess high watermark calls after async stream ended.");
     if (destructor_callback_.has_value()) {
@@ -166,11 +169,14 @@ protected:
   absl::optional<std::reference_wrapper<SidestreamWatermarkCallbacks>> watermark_callbacks_;
   bool complete_{};
   const bool discard_response_body_;
+  const bool new_async_client_retry_logic_{};
+  absl::optional<uint64_t> buffer_limit_{absl::nullopt};
 
 private:
   void cleanup();
   void closeRemote(bool end_stream);
   bool complete() { return local_closed_ && remote_closed_; }
+  void routerDestroy();
 
   // Http::StreamDecoderFilterCallbacks
   OptRef<const Network::Connection> connection() override { return {}; }
@@ -188,11 +194,24 @@ private:
   }
   void continueDecoding() override {}
   RequestTrailerMap& addDecodedTrailers() override { PANIC("not implemented"); }
-  void addDecodedData(Buffer::Instance&, bool) override {
-    // This should only be called if the user has set up buffering. The request is already fully
-    // buffered. Note that this is only called via the async client's internal use of the router
-    // filter which uses this function for buffering.
-    ASSERT(buffered_body_ != nullptr);
+  void addDecodedData(Buffer::Instance& data, bool) override {
+    if (!new_async_client_retry_logic_) {
+      // This should only be called if the user has set up buffering. The request is already fully
+      // buffered. Note that this is only called via the async client's internal use of the router
+      // filter which uses this function for buffering.
+      ASSERT(buffered_body_ != nullptr);
+      return;
+    }
+
+    // This will only be used by internal router filter for buffering for retries.
+
+    // If the buffer limit is reached, the router filter will ignore the retry and the following
+    // data will not be buffered. So, we don't need to check the buffer limit here because the
+    // router filter already did that.
+    if (buffered_body_ == nullptr) {
+      buffered_body_ = std::make_unique<Buffer::OwnedImpl>();
+    }
+    buffered_body_->move(data);
   }
   MetadataMapVector& addDecodedMetadata() override { PANIC("not implemented"); }
   void injectDecodedDataToFilterChain(Buffer::Instance&, bool) override {}
@@ -201,26 +220,7 @@ private:
   void sendLocalReply(Code code, absl::string_view body,
                       std::function<void(ResponseHeaderMap& headers)> modify_headers,
                       const absl::optional<Grpc::Status::GrpcStatus> grpc_status,
-                      absl::string_view details) override {
-    if (encoded_response_headers_) {
-      resetStream();
-      return;
-    }
-    Utility::sendLocalReply(
-        remote_closed_,
-        Utility::EncodeFunctions{nullptr, nullptr,
-                                 [this, modify_headers, &details](ResponseHeaderMapPtr&& headers,
-                                                                  bool end_stream) -> void {
-                                   if (modify_headers != nullptr) {
-                                     modify_headers(*headers);
-                                   }
-                                   encodeHeaders(std::move(headers), end_stream, details);
-                                 },
-                                 [this](Buffer::Instance& data, bool end_stream) -> void {
-                                   encodeData(data, end_stream);
-                                 }},
-        Utility::LocalReplyData{is_grpc_request_, code, body, grpc_status, is_head_request_});
-  }
+                      absl::string_view details) override;
   // The async client won't pause if sending 1xx headers so simply swallow any.
   void encode1xxHeaders(ResponseHeaderMapPtr&&) override {}
   void encodeHeaders(ResponseHeaderMapPtr&& headers, bool end_stream,
@@ -243,10 +243,18 @@ private:
   }
   void addDownstreamWatermarkCallbacks(DownstreamWatermarkCallbacks&) override {}
   void removeDownstreamWatermarkCallbacks(DownstreamWatermarkCallbacks&) override {}
-  void setDecoderBufferLimit(uint32_t) override {
+  void sendGoAwayAndClose(bool graceful [[maybe_unused]] = false) override {}
+
+  void setBufferLimit(uint64_t) override {
     IS_ENVOY_BUG("decoder buffer limits should not be overridden on async streams.");
   }
-  uint32_t decoderBufferLimit() override { return buffer_limit_.value_or(0); }
+  uint64_t bufferLimit() override {
+    if (new_async_client_retry_logic_) {
+      return buffer_limit_.value_or(kDefaultDecoderBufferLimit);
+    } else {
+      return buffer_limit_.value_or(0);
+    }
+  }
   bool recreateStream(const ResponseHeaderMap*) override { return false; }
   const ScopeTrackedObject& scope() override { return *this; }
   void restoreContextOnContinue(ScopeTrackedObjectStack& tracked_object_stack) override {
@@ -257,8 +265,7 @@ private:
   const Router::RouteSpecificFilterConfig* mostSpecificPerFilterConfig() const override {
     return nullptr;
   }
-  void traversePerFilterConfig(
-      std::function<void(const Router::RouteSpecificFilterConfig&)>) const override {}
+  Router::RouteSpecificFilterConfigs perFilterConfigs() const override { return {}; }
   Http1StreamEncoderOptionsOptRef http1StreamEncoderOptions() override { return {}; }
   OptRef<DownstreamStreamFilterCallbacks> downstreamCallbacks() override { return {}; }
   OptRef<UpstreamStreamFilterCallbacks> upstreamCallbacks() override { return {}; }
@@ -266,7 +273,7 @@ private:
   void setUpstreamOverrideHost(Upstream::LoadBalancerContext::OverrideHost) override {}
   absl::optional<Upstream::LoadBalancerContext::OverrideHost>
   upstreamOverrideHost() const override {
-    return absl::nullopt;
+    return upstream_override_host_;
   }
   bool shouldLoadShed() const override { return false; }
   absl::string_view filterConfigName() const override { return ""; }
@@ -291,14 +298,14 @@ private:
   StreamInfo::StreamInfoImpl stream_info_;
   Tracing::NullSpan active_span_;
   const Tracing::Config& tracing_config_;
-  const std::unique_ptr<const Router::RetryPolicy> retry_policy_;
+  const LocalReply::LocalReply& local_reply_;
+  Router::RouteConstSharedPtr parent_route_;
   std::shared_ptr<NullRouteImpl> route_;
   uint32_t high_watermark_calls_{};
   bool local_closed_{};
   bool remote_closed_{};
   Buffer::InstancePtr buffered_body_;
   Buffer::BufferMemoryAccountSharedPtr account_{nullptr};
-  absl::optional<uint32_t> buffer_limit_{absl::nullopt};
   RequestHeaderMap* request_headers_{};
   RequestTrailerMap* request_trailers_{};
   bool encoded_response_headers_{};
@@ -306,6 +313,10 @@ private:
   bool is_head_request_{false};
   bool send_xff_{true};
   bool send_internal_{true};
+  bool router_destroyed_{false};
+
+  // Upstream override host for bypassing load balancer selection
+  absl::optional<Upstream::LoadBalancerContext::OverrideHost> upstream_override_host_;
 
   friend class AsyncClientImpl;
   friend class AsyncClientImplUnitTest;
@@ -396,11 +407,19 @@ private:
 
   // Http::StreamDecoderFilterCallbacks
   void addDecodedData(Buffer::Instance&, bool) override {
-    // The request is already fully buffered. Note that this is only called via the async client's
-    // internal use of the router filter which uses this function for buffering.
+    // This will only be used by internal router filter for buffering for retries.
+    // But for AsyncRequest that all data is already buffered in request message
+    // and do not need to buffer again.
   }
   const Buffer::Instance* decodingBuffer() override { return &request_->body(); }
-  void modifyDecodingBuffer(std::function<void(Buffer::Instance&)>) override {}
+  uint64_t bufferLimit() override {
+    if (new_async_client_retry_logic_) {
+      // 0 means no limit because the whole body is already buffered in request message.
+      return 0;
+    } else {
+      return buffer_limit_.value_or(0);
+    }
+  }
 
   RequestMessagePtr request_;
 

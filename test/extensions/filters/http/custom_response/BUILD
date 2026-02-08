@@ -24,7 +24,7 @@ envoy_extension_cc_test_library(
         "//source/extensions/filters/http/custom_response:custom_response_filter",
         "//source/extensions/filters/http/custom_response:policy_interface",
         "//source/extensions/http/custom_response/redirect_policy:redirect_policy_lib",
-        "@com_google_absl//absl/strings",
+        "@abseil-cpp//absl/strings",
         "@envoy_api//envoy/extensions/filters/http/custom_response/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/http/custom_response/local_response_policy/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/http/custom_response/redirect_policy/v3:pkg_cc_proto",
@@ -36,6 +36,7 @@ envoy_extension_cc_test(
     size = "small",
     srcs = ["config_test.cc"],
     extension_names = ["envoy.filters.http.custom_response"],
+    rbe_pool = "6gig",
     deps = [
         ":utility_lib",
         "//source/common/http:message_lib",
@@ -55,6 +56,7 @@ envoy_extension_cc_test(
     size = "small",
     srcs = ["custom_response_filter_test.cc"],
     extension_names = ["envoy.filters.http.custom_response"],
+    rbe_pool = "6gig",
     deps = [
         ":utility_lib",
         "//source/common/http:message_lib",
@@ -81,6 +83,7 @@ envoy_extension_cc_test(
         "custom_response_integration_test.cc",
     ],
     extension_names = ["envoy.filters.http.custom_response"],
+    rbe_pool = "6gig",
     shard_count = 2,
     tags = [
         "cpu:3",

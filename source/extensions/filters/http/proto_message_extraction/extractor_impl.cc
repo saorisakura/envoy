@@ -31,7 +31,6 @@ namespace {
 using ::envoy::extensions::filters::http::proto_message_extraction::v3::MethodExtraction;
 using ::Envoy::Extensions::HttpFilters::ProtoMessageExtraction::ExtractedMessageDirective;
 using ::Envoy::Extensions::HttpFilters::ProtoMessageExtraction::ExtractedMessageMetadata;
-using ::google::grpc::transcoding::TypeHelper;
 using ::proto_processing_lib::proto_scrubber::ScrubberContext;
 using Protobuf::field_extraction::FieldValueExtractorFactory;
 
@@ -40,7 +39,7 @@ constexpr char kTypeProperty[] = "@type";
 
 ABSL_CONST_INIT const char* const kTypeServiceBaseUrl = "type.googleapis.com";
 
-void Extract(ProtoExtractorInterface& extractor, Protobuf::field_extraction::MessageData& message,
+void extract(ProtoExtractorInterface& extractor, Protobuf::field_extraction::MessageData& message,
              std::vector<ExtractedMessageMetadata>& vect) {
   ExtractedMessageMetadata data = extractor.ExtractMessage(message);
   ENVOY_LOG_MISC(debug, "Extracted fields: {}", data.extracted_message.DebugString());
@@ -55,20 +54,22 @@ void Extract(ProtoExtractorInterface& extractor, Protobuf::field_extraction::Mes
   }
 }
 
-std::string GetFullTypeWithUrl(absl::string_view simple_type) {
+std::string getFullTypeWithUrl(absl::string_view simple_type) {
   return absl::StrCat(kTypeServiceBaseUrl, "/", simple_type);
 }
 
-void FillStructWithType(const ::Envoy::ProtobufWkt::Type& type, ::Envoy::ProtobufWkt::Struct& out) {
-  (*out.mutable_fields())[kTypeProperty].set_string_value(GetFullTypeWithUrl(type.name()));
+void fillStructWithType(const ::Envoy::Protobuf::Type& type, ::Envoy::Protobuf::Struct& out) {
+  (*out.mutable_fields())[kTypeProperty].set_string_value(getFullTypeWithUrl(type.name()));
 }
 
-ExtractedMessageDirective TypeMapping(const MethodExtraction::ExtractDirective& type) {
+ExtractedMessageDirective typeMapping(const MethodExtraction::ExtractDirective& type) {
   switch (type) {
   case MethodExtraction::EXTRACT:
     return ExtractedMessageDirective::EXTRACT;
   case MethodExtraction::EXTRACT_REDACT:
     return ExtractedMessageDirective::EXTRACT_REDACT;
+  case MethodExtraction::EXTRACT_REPEATED_CARDINALITY:
+    return ExtractedMessageDirective::EXTRACT_REPEATED_CARDINALITY;
   case MethodExtraction::ExtractDirective_UNSPECIFIED:
     return ExtractedMessageDirective::EXTRACT;
   default:
@@ -81,22 +82,28 @@ ExtractedMessageDirective TypeMapping(const MethodExtraction::ExtractDirective& 
 absl::Status ExtractorImpl::init() {
   FieldValueExtractorFactory extractor_factory(type_finder_);
   for (const auto& it : method_extraction_.request_extraction_by_field()) {
-    auto extractor = extractor_factory.Create(request_type_url_, it.first);
-    if (!extractor.ok()) {
-      ENVOY_LOG_MISC(debug, "Extractor status not healthy: Status: {}", extractor.status());
-      return extractor.status();
+    // TODO(adh-goog): Allow repeated field extraction in field_value_extractor.
+    if (it.second != MethodExtraction::EXTRACT_REPEATED_CARDINALITY) {
+      auto extractor = extractor_factory.Create(request_type_url_, it.first);
+      if (!extractor.ok()) {
+        ENVOY_LOG_MISC(debug, "Extractor status not healthy: Status: {}", extractor.status());
+        return extractor.status();
+      }
     }
 
-    request_field_path_to_extract_type_[it.first].push_back(TypeMapping(it.second));
+    request_field_path_to_extract_type_[it.first].push_back(typeMapping(it.second));
   }
 
   for (const auto& it : method_extraction_.response_extraction_by_field()) {
-    auto extractor = extractor_factory.Create(response_type_url_, it.first);
-    if (!extractor.ok()) {
-      return extractor.status();
+    // TODO(adh-goog): Allow repeated field extraction in field_value_extractor.
+    if (it.second != MethodExtraction::EXTRACT_REPEATED_CARDINALITY) {
+      auto extractor = extractor_factory.Create(response_type_url_, it.first);
+      if (!extractor.ok()) {
+        return extractor.status();
+      }
     }
 
-    response_field_path_to_extract_type_[it.first].push_back(TypeMapping(it.second));
+    response_field_path_to_extract_type_[it.first].push_back(typeMapping(it.second));
   }
 
   request_extractor_ =
@@ -107,17 +114,17 @@ absl::Status ExtractorImpl::init() {
                                                type_finder_(response_type_url_),
                                                response_field_path_to_extract_type_);
 
-  FillStructWithType(*type_finder_(request_type_url_), result_.request_type_struct);
-  FillStructWithType(*type_finder_(response_type_url_), result_.response_type_struct);
+  fillStructWithType(*type_finder_(request_type_url_), result_.request_type_struct);
+  fillStructWithType(*type_finder_(response_type_url_), result_.response_type_struct);
   return absl::OkStatus();
 }
 
 void ExtractorImpl::processRequest(Protobuf::field_extraction::MessageData& message) {
-  Extract(*request_extractor_, message, result_.request_data);
+  extract(*request_extractor_, message, result_.request_data);
 }
 
 void ExtractorImpl::processResponse(Protobuf::field_extraction::MessageData& message) {
-  Extract(*response_extractor_, message, result_.response_data);
+  extract(*response_extractor_, message, result_.response_data);
 }
 } // namespace ProtoMessageExtraction
 } // namespace HttpFilters

@@ -4,6 +4,7 @@
 #include "envoy/extensions/filters/network/tcp_proxy/v3/tcp_proxy.pb.h"
 #include "envoy/http/filter.h"
 #include "envoy/http/header_evaluator.h"
+#include "envoy/http/request_id_extension.h"
 #include "envoy/stream_info/stream_info.h"
 #include "envoy/tcp/conn_pool.h"
 #include "envoy/upstream/upstream.h"
@@ -41,6 +42,17 @@ public:
 
   // The evaluator to add additional HTTP request headers to the upstream request.
   virtual Envoy::Http::HeaderEvaluator& headerEvaluator() const PURE;
+
+  // The request ID extension used for generation/validation when tunneling.
+  virtual const Envoy::Http::RequestIDExtensionSharedPtr& requestIDExtension() const PURE;
+
+  // Optional request header name used to emit the generated request ID on the tunneling request.
+  // If empty, the default header name "x-request-id" is used.
+  virtual const std::string& requestIDHeader() const PURE;
+
+  // Optional dynamic metadata key used to store the generated request ID under the TCP proxy
+  // namespace. If empty, the default key "tunnel_request_id" is used.
+  virtual const std::string& requestIDMetadataKey() const PURE;
 
   // Save HTTP response headers to the downstream filter state.
   virtual void
@@ -157,10 +169,15 @@ public:
    * @return the const SSL connection data of upstream.
    */
   virtual Ssl::ConnectionInfoConstSharedPtr getUpstreamConnectionSslInfo() PURE;
+
+  /**
+   * Called when upstream connection is closed.
+   * @return the detected close type from socket.
+   */
+  virtual StreamInfo::DetectedCloseType detectedCloseType() const PURE;
 };
 
 using GenericConnPoolPtr = std::unique_ptr<GenericConnPool>;
-
 /*
  * A factory for creating generic connection pools.
  */
@@ -169,6 +186,7 @@ public:
   ~GenericConnPoolFactory() override = default;
 
   /*
+   * @param host the host to connect to
    * @param thread_local_cluster the thread local cluster to use for conn pool creation.
    * @param config the tunneling config, if doing connect tunneling.
    * @param context the load balancing context for this connection.
@@ -176,13 +194,12 @@ public:
    * @param downstream_info is the downstream connection stream info.
    * @return may be null if there is no cluster with the given name.
    */
-  virtual GenericConnPoolPtr
-  createGenericConnPool(Upstream::ThreadLocalCluster& thread_local_cluster,
-                        TunnelingConfigHelperOptConstRef config,
-                        Upstream::LoadBalancerContext* context,
-                        Tcp::ConnectionPool::UpstreamCallbacks& upstream_callbacks,
-                        Http::StreamDecoderFilterCallbacks& stream_decoder_callbacks,
-                        StreamInfo::StreamInfo& downstream_info) const PURE;
+  virtual GenericConnPoolPtr createGenericConnPool(
+      Upstream::HostConstSharedPtr host, Upstream::ThreadLocalCluster& thread_local_cluster,
+      TunnelingConfigHelperOptConstRef config, Upstream::LoadBalancerContext* context,
+      Tcp::ConnectionPool::UpstreamCallbacks& upstream_callbacks,
+      Http::StreamDecoderFilterCallbacks& stream_decoder_callbacks,
+      StreamInfo::StreamInfo& downstream_info) const PURE;
 };
 
 using GenericConnPoolFactoryPtr = std::unique_ptr<GenericConnPoolFactory>;

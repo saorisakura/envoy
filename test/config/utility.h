@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -55,6 +56,11 @@ public:
 
     ServerSslOptions& setEcdsaCert(bool ecdsa_cert) {
       ecdsa_cert_ = ecdsa_cert;
+      return *this;
+    }
+
+    ServerSslOptions& setEcdsaCertName(const std::string& ecdsa_cert_name) {
+      ecdsa_cert_name_ = ecdsa_cert_name;
       return *this;
     }
 
@@ -144,6 +150,7 @@ public:
     bool rsa_cert_{true};
     bool rsa_cert_ocsp_staple_{true};
     bool ecdsa_cert_{false};
+    std::string ecdsa_cert_name_{"server_ecdsa"};
     bool ecdsa_cert_ocsp_staple_{false};
     bool prefer_client_ciphers_{false};
     bool ocsp_staple_required_{false};
@@ -158,8 +165,7 @@ public:
     bool keylog_multiple_ips_{false};
     std::string keylog_path_;
     Network::Address::IpVersion ip_version_{Network::Address::IpVersion::v4};
-    std::vector<envoy::extensions::transport_sockets::tls::v3::SubjectAltNameMatcher>
-        san_matchers_{};
+    std::vector<envoy::extensions::transport_sockets::tls::v3::SubjectAltNameMatcher> san_matchers_;
     std::string tls_cert_selector_yaml_{""};
     bool client_with_intermediate_cert_{false};
     bool trust_root_only_{false};
@@ -201,7 +207,8 @@ public:
                                            bool multiple_addresses = false);
 
   // A string for a tls inspector listener filter which can be used with addListenerFilter()
-  static std::string tlsInspectorFilter(bool enable_ja3_fingerprinting = false);
+  static std::string tlsInspectorFilter(bool enable_ja3_fingerprinting = false,
+                                        bool enable_ja4_fingerprinting = false);
 
   // A string for the test inspector filter.
   static std::string testInspectorFilter();
@@ -219,8 +226,6 @@ public:
   static std::string smallBufferFilter();
   // A string for a health check filter which can be used with prependFilter()
   static std::string defaultHealthCheckFilter();
-  // A string for a squash filter which can be used with prependFilter()
-  static std::string defaultSquashFilter();
   // A string for startTls transport socket config.
   static std::string startTlsConfig();
   // A cluster that uses the startTls transport socket.
@@ -274,8 +279,17 @@ public:
                                                              const std::string& address,
                                                              const std::string& stat_prefix);
 
-  static envoy::config::route::v3::RouteConfiguration buildRouteConfig(const std::string& name,
-                                                                       const std::string& cluster);
+  static envoy::config::route::v3::RouteConfiguration
+  buildRouteConfig(const std::string& name, const std::string& cluster,
+                   bool header_mutations = false);
+
+  static envoy::config::route::v3::RouteConfiguration
+  buildRouteConfigWithVhdsOverAds(const std::string& name);
+
+  static envoy::config::route::v3::VirtualHost buildVirtualHost(const std::string& name,
+                                                                const std::string& domain,
+                                                                const std::string& prefix,
+                                                                const std::string& cluster);
 
   // Builds a standard Endpoint suitable for population by finalize().
   static envoy::config::endpoint::v3::Endpoint buildEndpoint(const std::string& address);
@@ -288,6 +302,9 @@ public:
 
   // Called by finalize to set up the ports.
   void setPorts(const std::vector<uint32_t>& ports, bool override_port_zero = false);
+
+  // Switch from a default of round robin to async round robin.
+  void setAsyncLb(bool hang = false);
 
   // Set source_address in the bootstrap bind config.
   void setSourceAddress(const std::string& address_string);
@@ -318,7 +335,7 @@ public:
   void disableDelayClose();
 
   // Set the max_requests_per_connection for downstream through the HttpConnectionManager.
-  void setDownstreamMaxRequestsPerConnection(uint64_t max_requests_per_connection);
+  void setDownstreamMaxRequestsPerConnection(uint32_t max_requests_per_connection);
 
   envoy::config::route::v3::VirtualHost createVirtualHost(const char* host, const char* route = "/",
                                                           const char* cluster = "cluster_0");
@@ -359,8 +376,7 @@ public:
   void addSslConfig() { addSslConfig({}); }
 
   // Add the default SSL configuration for QUIC downstream.
-  void addQuicDownstreamTransportSocketConfig(bool enable_early_data,
-                                              std::vector<absl::string_view> custom_alpns);
+  void addQuicDownstreamTransportSocketConfig();
 
   // Set the HTTP access log for the first HCM (if present) to a given file. The default is
   // the platform's null device.
@@ -408,6 +424,14 @@ public:
   // Set limits on pending upstream outbound frames.
   void setUpstreamOutboundFramesLimits(uint32_t max_all_frames, uint32_t max_control_frames);
 
+  // Set limits on HTTP/2 concurrent streams.
+  void setDownstreamHttp2MaxConcurrentStreams(uint32_t max_streams);
+  void setUpstreamHttp2MaxConcurrentStreams(uint32_t max_streams);
+
+  // Set limits on HTTP/2 window sizes.
+  void setDownstreamHttp2WindowSize(uint32_t stream_window, uint32_t connection_window);
+  void setUpstreamHttp2WindowSize(uint32_t stream_window, uint32_t connection_window);
+
   // Return the bootstrap configuration for hand-off to Envoy.
   const envoy::config::bootstrap::v3::Bootstrap& bootstrap() { return bootstrap_; }
 
@@ -419,7 +443,7 @@ public:
       bool use_alpn = false, bool http3 = false,
       absl::optional<envoy::config::core::v3::AlternateProtocolsCacheOptions>
           alternate_protocol_cache_config = {},
-      std::function<void(envoy::extensions::transport_sockets::tls::v3::CommonTlsContext&)>
+      std::function<void(envoy::extensions::transport_sockets::tls::v3::UpstreamTlsContext&)>
           configure_tls_context = nullptr);
 
   // Skip validation that ensures that all upstream ports are referenced by the
@@ -430,7 +454,7 @@ public:
   void addRuntimeOverride(absl::string_view key, absl::string_view value);
 
   // Add typed_filter_metadata to the first listener.
-  void addListenerTypedMetadata(absl::string_view key, ProtobufWkt::Any& packed_value);
+  void addListenerTypedMetadata(absl::string_view key, Protobuf::Any& packed_value);
 
   // Add filter_metadata to a cluster with the given name
   void addClusterFilterMetadata(absl::string_view metadata_yaml,
@@ -460,6 +484,8 @@ public:
   static void setProtocolOptions(envoy::config::cluster::v3::Cluster& cluster,
                                  HttpProtocolOptions& protocol_options);
   static void setHttp2(envoy::config::cluster::v3::Cluster& cluster);
+  static void setHttp2WithMaxConcurrentStreams(envoy::config::cluster::v3::Cluster& cluster,
+                                               uint32_t max_concurrent_streams);
 
   // Populate and return a Http3ProtocolOptions instance based on http2_options.
   static envoy::config::core::v3::Http3ProtocolOptions

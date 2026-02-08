@@ -80,6 +80,8 @@ public:
 
   Configuration::FactoryContext& factoryContext() { return factory_context_; }
 
+  const Matcher::MatchTreePtr<Http::HttpMatchingData>& forwardClientCertMatcher() const override;
+
   // Server::Admin
   // TODO(jsedgwick) These can be managed with a generic version of ConfigTracker.
   // Wins would be no manual removeHandler() and code reuse.
@@ -94,7 +96,7 @@ public:
   bool removeHandler(const std::string& prefix) override;
   ConfigTracker& getConfigTracker() override;
 
-  void startHttpListener(std::list<AccessLog::InstanceSharedPtr> access_logs,
+  void startHttpListener(AccessLog::InstanceSharedPtrVector access_logs,
                          Network::Address::InstanceConstSharedPtr address,
                          Network::Socket::OptionsSharedPtr socket_options) override;
   uint32_t concurrency() const override { return server_.options().concurrency(); }
@@ -115,11 +117,9 @@ public:
   bool createQuicListenerFilterChain(Network::QuicListenerFilterManager&) override { return true; }
 
   // Http::FilterChainFactory
-  bool createFilterChain(Http::FilterChainManager& manager, bool,
-                         const Http::FilterChainOptions&) const override;
+  bool createFilterChain(Http::FilterChainFactoryCallbacks& callbacks) const override;
   bool createUpgradeFilterChain(absl::string_view, const Http::FilterChainFactory::UpgradeMap*,
-                                Http::FilterChainManager&,
-                                const Http::FilterChainOptions&) const override {
+                                Http::FilterChainFactoryCallbacks&) const override {
     return false;
   }
 
@@ -127,7 +127,14 @@ public:
   const Http::RequestIDExtensionSharedPtr& requestIDExtension() override {
     return request_id_extension_;
   }
-  const std::list<AccessLog::InstanceSharedPtr>& accessLogs() override { return access_logs_; }
+  const AccessLog::InstanceSharedPtrVector& accessLogs() override { return access_logs_; }
+  bool acceptTargetPath(absl::string_view path_name) const {
+    return std::any_of(allowlisted_paths_.begin(), allowlisted_paths_.end(),
+                       [path_name](const Matchers::StringMatcherPtr& matcher) {
+                         return matcher->match(path_name);
+                       });
+  }
+  void addAllowlistedPath(Matchers::StringMatcherPtr matcher);
   bool flushAccessLogOnNewRequest() override { return flush_access_log_on_new_request_; }
   bool flushAccessLogOnTunnelSuccessfullyEstablished() const override { return false; }
   const absl::optional<std::chrono::milliseconds>& accessLogFlushInterval() override {
@@ -152,6 +159,9 @@ public:
   uint32_t maxRequestHeadersKb() const override { return max_request_headers_kb_; }
   uint32_t maxRequestHeadersCount() const override { return max_request_headers_count_; }
   std::chrono::milliseconds streamIdleTimeout() const override { return {}; }
+  absl::optional<std::chrono::milliseconds> streamFlushTimeout() const override {
+    return std::nullopt;
+  }
   std::chrono::milliseconds requestTimeout() const override { return {}; }
   std::chrono::milliseconds requestHeadersTimeout() const override { return {}; }
   std::chrono::milliseconds delayedCloseTimeout() const override { return {}; }
@@ -220,7 +230,7 @@ public:
   void closeSocket() override;
   void addListenerToHandler(Network::ConnectionHandler* handler) override;
 
-  uint64_t maxRequestsPerConnection() const override { return 0; }
+  uint32_t maxRequestsPerConnection() const override { return 0; }
   const HttpConnectionManagerProto::ProxyStatusConfig* proxyStatusConfig() const override {
     return proxy_status_config_.get();
   }
@@ -239,6 +249,12 @@ public:
   bool appendLocalOverload() const override { return false; }
   bool appendXForwardedPort() const override { return false; }
   bool addProxyProtocolConnectionState() const override { return true; }
+  const absl::flat_hash_set<uint32_t>& httpsDestinationPorts() const override {
+    return https_destination_ports_;
+  }
+  const absl::flat_hash_set<uint32_t>& httpDestinationPorts() const override {
+    return http_destination_ports_;
+  }
 
 private:
   friend class AdminTestingPeer;
@@ -358,7 +374,7 @@ private:
     }
     Network::ListenSocketFactoryPtr clone() const override { return nullptr; }
     void closeAllSockets() override {}
-    void doFinalPreWorkerInit() override {}
+    absl::Status doFinalPreWorkerInit() override { return absl::OkStatus(); }
 
   private:
     Network::SocketSharedPtr socket_;
@@ -395,7 +411,7 @@ private:
       return connection_balancer_;
     }
     ResourceLimit& openConnections() override { return open_connections_; }
-    const std::vector<AccessLog::InstanceSharedPtr>& accessLogs() const override {
+    const AccessLog::InstanceSharedPtrVector& accessLogs() const override {
       return empty_access_logs_;
     }
     uint32_t tcpBacklogSize() const override { return ENVOY_TCP_BACKLOG_SIZE; }
@@ -414,7 +430,7 @@ private:
     BasicResourceLimitImpl open_connections_;
 
   private:
-    const std::vector<AccessLog::InstanceSharedPtr> empty_access_logs_;
+    const AccessLog::InstanceSharedPtrVector empty_access_logs_;
     std::unique_ptr<Init::Manager> init_manager_;
     const bool ignore_global_conn_limit_;
   };
@@ -441,16 +457,25 @@ private:
 
     absl::string_view name() const override { return "admin"; }
 
+    bool addedViaApi() const override { return false; }
+
+    const Network::FilterChainInfoSharedPtr& filterChainInfo() const override {
+      return filter_chain_info_;
+    }
+
   private:
     const Network::RawBufferSocketFactory transport_socket_factory_;
     const Filter::NetworkFilterFactoriesList empty_network_filter_factory_;
+    const Network::FilterChainInfoSharedPtr filter_chain_info_;
   };
 
   Server::Instance& server_;
   const Network::ListenerInfoConstSharedPtr listener_info_;
   AdminFactoryContext factory_context_;
   Http::RequestIDExtensionSharedPtr request_id_extension_;
-  std::list<AccessLog::InstanceSharedPtr> access_logs_;
+  AccessLog::InstanceSharedPtrVector access_logs_;
+  std::vector<Matchers::StringMatcherPtr> allowlisted_paths_;
+  Matcher::MatchTreePtr<Http::HttpMatchingData> forward_client_cert_matcher_;
   const bool flush_access_log_on_new_request_ = false;
   const absl::optional<std::chrono::milliseconds> null_access_log_flush_interval_;
   const std::string profile_path_;
@@ -493,13 +518,15 @@ private:
   AdminListenerPtr listener_;
   const AdminInternalAddressConfig internal_address_config_;
   const LocalReply::LocalReplyPtr local_reply_;
-  const std::vector<Http::OriginalIPDetectionSharedPtr> detection_extensions_{};
-  const std::vector<Http::EarlyHeaderMutationPtr> early_header_mutations_{};
-  const absl::optional<std::string> scheme_{};
+  const std::vector<Http::OriginalIPDetectionSharedPtr> detection_extensions_;
+  const std::vector<Http::EarlyHeaderMutationPtr> early_header_mutations_;
+  const absl::optional<std::string> scheme_;
   const bool scheme_match_upstream_ = false;
   const bool ignore_global_conn_limit_;
   std::unique_ptr<HttpConnectionManagerProto::ProxyStatusConfig> proxy_status_config_;
   const Http::HeaderValidatorFactoryPtr header_validator_factory_;
+  const absl::flat_hash_set<uint32_t> https_destination_ports_;
+  const absl::flat_hash_set<uint32_t> http_destination_ports_;
 };
 
 } // namespace Server

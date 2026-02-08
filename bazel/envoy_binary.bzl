@@ -1,5 +1,6 @@
 # DO NOT LOAD THIS FILE. Load envoy_build_system.bzl instead.
 # Envoy binary targets
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 load(
     ":envoy_internal.bzl",
     "envoy_copts",
@@ -18,6 +19,8 @@ def envoy_cc_binary(
         data = [],
         testonly = 0,
         visibility = None,
+        rbe_pool = None,
+        exec_properties = {},
         external_deps = [],
         repository = "",
         stamp = 1,
@@ -27,6 +30,10 @@ def envoy_cc_binary(
         tags = [],
         features = [],
         linkstatic = True):
+    exec_properties = exec_properties | select({
+        repository + "//bazel:engflow_rbe_x86_64": {"Pool": rbe_pool} if rbe_pool else {},
+        "//conditions:default": {},
+    })
     linker_inputs = envoy_exported_symbols_input()
 
     if not linkopts:
@@ -36,12 +43,13 @@ def envoy_cc_binary(
         deps = deps + _envoy_stamped_deps()
     linkopts += envoy_dbg_linkopts()
     deps = deps + [envoy_external_dep_path(dep) for dep in external_deps] + envoy_stdlib_deps()
-    native.cc_binary(
+    cc_binary(
         name = name,
         srcs = srcs,
         data = data,
         additional_linker_inputs = linker_inputs,
         copts = envoy_copts(repository),
+        exec_properties = exec_properties,
         linkopts = linkopts,
         testonly = testonly,
         linkstatic = linkstatic,
@@ -84,7 +92,7 @@ def _envoy_linkopts():
         ],
     }) + select({
         "@envoy//bazel:apple": [],
-        "@envoy//bazel:boringssl_fips": [],
+        "@envoy//bazel:fips_build": [],
         "@envoy//bazel:windows_x86_64": [],
         "//conditions:default": ["-pie"],
     }) + envoy_select_exported_symbols(["-Wl,-E"])

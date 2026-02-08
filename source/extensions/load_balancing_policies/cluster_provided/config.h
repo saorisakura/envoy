@@ -9,7 +9,7 @@
 
 namespace Envoy {
 namespace Extensions {
-namespace LoadBalancingPolices {
+namespace LoadBalancingPolicies {
 namespace ClusterProvided {
 
 class ClusterProvidedLbConfig : public Upstream::LoadBalancerConfig {
@@ -30,9 +30,12 @@ public:
                                               Random::RandomGenerator& random,
                                               TimeSource& time_source) override;
 
-  Upstream::LoadBalancerConfigPtr loadConfig(Upstream::LoadBalancerFactoryContext&,
-                                             const Protobuf::Message&,
-                                             ProtobufMessage::ValidationVisitor&) override {
+  absl::StatusOr<Upstream::LoadBalancerConfigPtr>
+  loadConfig(Server::Configuration::ServerFactoryContext&, const Protobuf::Message&) override {
+    return std::make_unique<ClusterProvidedLbConfig>();
+  }
+  absl::StatusOr<Upstream::LoadBalancerConfigPtr>
+  loadLegacy(Server::Configuration::ServerFactoryContext&, const Upstream::ClusterProto&) override {
     return std::make_unique<ClusterProvidedLbConfig>();
   }
 };
@@ -40,6 +43,6 @@ public:
 DECLARE_FACTORY(Factory);
 
 } // namespace ClusterProvided
-} // namespace LoadBalancingPolices
+} // namespace LoadBalancingPolicies
 } // namespace Extensions
 } // namespace Envoy

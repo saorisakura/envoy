@@ -1,8 +1,11 @@
-load("@rules_fuzzing//fuzzing:cc_defs.bzl", "fuzzing_decoration")
+load("@envoy_repo//:compiler.bzl", "LLVM_PATH")
 
 # DO NOT LOAD THIS FILE. Load envoy_build_system.bzl instead.
 # Envoy test targets. This includes both test library and test binary targets.
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_fuzzing//fuzzing:cc_defs.bzl", "fuzzing_decoration")
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load(":envoy_binary.bzl", "envoy_cc_binary")
 load(
     ":envoy_internal.bzl",
@@ -40,12 +43,12 @@ def _envoy_cc_test_infrastructure_library(
     extra_deps = []
     pch_copts = []
     if disable_pch:
-        extra_deps = [envoy_external_dep_path("googletest")]
+        extra_deps = ["@googletest//:gtest"]
     else:
         extra_deps = envoy_pch_deps(repository, "//test:test_pch")
         pch_copts = envoy_pch_copts(repository, "//test:test_pch")
 
-    native.cc_library(
+    cc_library(
         name = name,
         srcs = srcs,
         hdrs = hdrs,
@@ -80,11 +83,17 @@ def envoy_cc_fuzz_test(
         name,
         corpus,
         dictionaries = [],
+        rbe_pool = None,
+        exec_properties = {},
         repository = "",
         size = "medium",
         deps = [],
         tags = [],
         **kwargs):
+    exec_properties = exec_properties | select({
+        repository + "//bazel:engflow_rbe_x86_64": {"Pool": rbe_pool} if rbe_pool else {},
+        "//conditions:default": {},
+    })
     if not (corpus.startswith("//") or corpus.startswith(":") or corpus.startswith("@")):
         corpus_name = name + "_corpus_files"
         native.filegroup(
@@ -97,6 +106,7 @@ def envoy_cc_fuzz_test(
     test_lib_name = name + "_lib"
     envoy_cc_test_library(
         name = test_lib_name,
+        exec_properties = exec_properties,
         deps = deps + envoy_stdlib_deps() + [
             repository + "//test/fuzz:fuzz_runner_lib",
             repository + "//test/test_common:test_version_linkstamp",
@@ -106,7 +116,7 @@ def envoy_cc_fuzz_test(
         **kwargs
     )
 
-    native.cc_test(
+    cc_test(
         name = name,
         copts = envoy_copts("@envoy", test = True),
         additional_linker_inputs = envoy_exported_symbols_input(),
@@ -121,6 +131,7 @@ def envoy_cc_fuzz_test(
             "//conditions:default": ["$(locations %s)" % corpus_name],
         }),
         data = [corpus_name],
+        exec_properties = exec_properties,
         # No fuzzing on macOS or Windows
         deps = select({
             "@envoy//bazel:apple": [repository + "//test:dummy_main"],
@@ -163,21 +174,30 @@ def envoy_cc_test(
         size = "medium",
         flaky = False,
         env = {},
+        rbe_pool = None,
         exec_properties = {}):
     coverage_tags = tags + ([] if coverage else ["nocoverage"])
-
-    native.cc_test(
+    exec_properties = exec_properties | select({
+        repository + "//bazel:engflow_rbe_x86_64": {"Pool": rbe_pool} if rbe_pool else {},
+        "//conditions:default": {},
+    })
+    cc_test(
         name = name,
         srcs = srcs,
-        data = data,
+        data = data + select({
+            "%s//bazel:local_asan_build" % repository: [],
+            "%s//bazel:asan_build" % repository: ["@llvm_toolchain_llvm//:symbolizer"],
+            "//conditions:default": [],
+        }),
         copts = envoy_copts(repository, test = True) + copts + envoy_pch_copts(repository, "//test:test_pch"),
         additional_linker_inputs = envoy_exported_symbols_input(),
         linkopts = _envoy_test_linkopts() + linkopts,
         linkstatic = envoy_linkstatic(),
         malloc = tcmalloc_external_dep(repository),
-        deps = envoy_stdlib_deps() + deps + [envoy_external_dep_path(dep) for dep in external_deps + ["googletest"]] + [
+        deps = envoy_stdlib_deps() + deps + [envoy_external_dep_path(dep) for dep in external_deps] + [
             repository + "//test:main",
             repository + "//test/test_common:test_version_linkstamp",
+            "@googletest//:gtest",
         ] + envoy_pch_deps(repository, "//test:test_pch"),
         # from https://github.com/google/googletest/blob/6e1970e2376c14bf658eb88f655a054030353f9f/googlemock/src/gmock.cc#L51
         # 2 - by default, mocks act as StrictMocks.
@@ -187,7 +207,11 @@ def envoy_cc_test(
         shard_count = shard_count,
         size = size,
         flaky = flaky,
-        env = env,
+        env = env | select({
+            "%s//bazel:local_asan_build" % repository: {"ASAN_SYMBOLIZER_PATH": "%s/bin/llvm-symbolizer" % LLVM_PATH},
+            "%s//bazel:asan_build" % repository: {"ASAN_SYMBOLIZER_PATH": "$(location @llvm_toolchain_llvm//:symbolizer)"},
+            "//conditions:default": {},
+        }),
         exec_properties = exec_properties,
     )
 
@@ -198,6 +222,8 @@ def envoy_cc_test_library(
         srcs = [],
         hdrs = [],
         data = [],
+        rbe_pool = None,
+        exec_properties = {},
         external_deps = [],
         deps = [],
         repository = "",
@@ -206,6 +232,10 @@ def envoy_cc_test_library(
         copts = [],
         alwayslink = 1,
         **kargs):
+    exec_properties = exec_properties | select({
+        repository + "//bazel:engflow_rbe_x86_64": {"Pool": rbe_pool} if rbe_pool else {},
+        "//conditions:default": {},
+    })
     disable_pch = kargs.pop("disable_pch", True)
     _envoy_cc_test_infrastructure_library(
         name,
@@ -221,6 +251,7 @@ def envoy_cc_test_library(
         visibility = ["//visibility:public"],
         alwayslink = alwayslink,
         disable_pch = disable_pch,
+        exec_properties = exec_properties,
         **kargs
     )
 
@@ -266,14 +297,22 @@ def envoy_benchmark_test(
         name,
         benchmark_binary,
         data = [],
+        rbe_pool = None,
+        exec_properties = {},
         tags = [],
         repository = "",
         **kargs):
-    native.sh_test(
+    exec_properties = exec_properties | select({
+        repository + "//bazel:engflow_rbe_x86_64": {"Pool": rbe_pool} if rbe_pool else {},
+        "//conditions:default": {},
+    })
+    sh_test(
         name = name,
         srcs = [repository + "//bazel:test_for_benchmark_wrapper.sh"],
+        deps = ["@bazel_tools//tools/bash/runfiles"],
         data = [":" + benchmark_binary] + data,
-        args = ["%s/%s" % (native.package_name(), benchmark_binary)],
+        exec_properties = exec_properties,
+        args = ["$(rlocationpath %s)" % native.package_relative_label(benchmark_binary)],
         tags = tags + ["nocoverage"],
         **kargs
     )
@@ -336,7 +375,7 @@ def envoy_sh_test(
         )
 
     else:
-        native.sh_test(
+        sh_test(
             name = name,
             srcs = ["//bazel:sh_test_wrapper.sh"],
             data = srcs + data + cc_binary,

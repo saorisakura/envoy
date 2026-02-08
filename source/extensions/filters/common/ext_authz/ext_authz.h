@@ -28,6 +28,7 @@ struct TracingConstantValues {
   const std::string TraceStatus = "ext_authz_status";
   const std::string TraceUnauthz = "ext_authz_unauthorized";
   const std::string TraceOk = "ext_authz_ok";
+  const std::string TraceError = "ext_authz_error";
   const std::string HttpStatus = "ext_authz_http_status";
 };
 
@@ -77,6 +78,22 @@ enum class CheckStatus {
 
 using UnsafeHeader = std::pair<std::string, std::string>;
 using UnsafeHeaderVector = std::vector<UnsafeHeader>;
+
+using HeaderAppendAction = envoy::config::core::v3::HeaderValueOption::HeaderAppendAction;
+using HeaderValueOption = envoy::config::core::v3::HeaderValueOption;
+
+// A single header mutation with its action type, preserving order from the proto.
+struct HeaderMutation {
+  std::string key;
+  std::string value;
+  HeaderAppendAction append_action;
+  // True if this mutation came from the deprecated 'append' boolean field.
+  // When true and append_action is APPEND_IF_EXISTS_OR_ADD, use appendCopy() instead
+  // of addCopy() for backward compatibility.
+  bool from_deprecated_append{false};
+};
+using HeaderMutationVector = std::vector<HeaderMutation>;
+
 /**
  * Authorization response object for a RequestCallback.
  *
@@ -86,46 +103,38 @@ using UnsafeHeaderVector = std::vector<UnsafeHeader>;
 struct Response {
   // Call status.
   CheckStatus status;
-  // A set of HTTP headers returned by the authorization server, that will be optionally appended
-  // to the request to the upstream server.
-  UnsafeHeaderVector headers_to_append;
-  // A set of HTTP headers returned by the authorization server, will be optionally set
-  // (using "setCopy") to the request to the upstream server.
-  UnsafeHeaderVector headers_to_set;
-  // A set of HTTP headers returned by the authorization server, will be optionally added
-  // (using "addCopy") to the request to the upstream server.
-  UnsafeHeaderVector headers_to_add;
-  // A set of HTTP headers returned by the authorization server, will be optionally added
-  // (using "addCopy") to the response sent back to the downstream client on OK auth
-  // responses.
-  UnsafeHeaderVector response_headers_to_add;
-  // A set of HTTP headers returned by the authorization server, will be optionally set (using
-  // "setCopy") to the response sent back to the downstream client on OK auth responses.
-  UnsafeHeaderVector response_headers_to_set;
-  // A set of HTTP headers returned by the authorization server, will be optionally added
-  // (using "addCopy") to the response sent back to the downstream client on OK auth
-  // responses only if the headers were not returned from the authz server.
-  UnsafeHeaderVector response_headers_to_add_if_absent;
-  // A set of HTTP headers returned by the authorization server, will be optionally set (using
-  // "setCopy") to the response sent back to the downstream client on OK auth responses
-  // only if the headers were returned from the authz server.
-  UnsafeHeaderVector response_headers_to_overwrite_if_exists;
+  // Ordered list of header mutations for upstream request headers on OK responses.
+  // Mutations are applied in the order they appear in this vector.
+  HeaderMutationVector request_header_mutations{};
+  // Ordered list of header mutations for downstream response headers on OK responses.
+  // Mutations are applied in the order they appear in this vector.
+  HeaderMutationVector response_header_mutations{};
+  // Ordered list of header mutations for local reply headers on Denied/Error responses.
+  // These headers are sent back to the downstream client as part of the local reply.
+  // Mutations are applied in the order they appear in this vector.
+  HeaderMutationVector local_response_header_mutations{};
+  // Whether the authorization server returned any headers with an invalid append action type.
+  bool saw_invalid_append_actions{false};
   // A set of HTTP headers consumed by the authorization server, will be removed
   // from the request to the upstream server.
-  std::vector<std::string> headers_to_remove;
+  std::vector<std::string> headers_to_remove{};
   // A set of query string parameters to be set (possibly overwritten) on the
   // request to the upstream server.
-  Http::Utility::QueryParamsVector query_parameters_to_set;
+  Http::Utility::QueryParamsVector query_parameters_to_set{};
   // A set of query string parameters to remove from the request to the upstream server.
-  std::vector<std::string> query_parameters_to_remove;
+  std::vector<std::string> query_parameters_to_remove{};
   // Optional http body used only on denied response.
-  std::string body;
+  std::string body{};
   // Optional http status used only on denied response.
   Http::Code status_code{};
 
   // A set of metadata returned by the authorization server, that will be emitted as filter's
   // dynamic metadata that other filters can leverage.
-  ProtobufWkt::Struct dynamic_metadata;
+  Protobuf::Struct dynamic_metadata{};
+
+  // The gRPC status returned by the authorization server when it is making a
+  // gRPC call.
+  absl::optional<Grpc::Status::GrpcStatus> grpc_status{absl::nullopt};
 };
 
 using ResponsePtr = std::unique_ptr<Response>;
@@ -165,6 +174,11 @@ public:
   virtual void check(RequestCallbacks& callback,
                      const envoy::service::auth::v3::CheckRequest& request,
                      Tracing::Span& parent_span, const StreamInfo::StreamInfo& stream_info) PURE;
+
+  /**
+   * Returns streamInfo of the current request if possible. By default just return a nullptr.
+   */
+  virtual StreamInfo::StreamInfo const* streamInfo() const { return nullptr; }
 };
 
 using ClientPtr = std::unique_ptr<Client>;

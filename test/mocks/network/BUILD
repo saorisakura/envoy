@@ -13,6 +13,7 @@ envoy_cc_mock(
     name = "connection_mocks",
     srcs = ["connection.cc"],
     hdrs = ["connection.h"],
+    rbe_pool = "6gig",
     deps = [
         "//envoy/network:connection_interface",
         "//source/common/network:filter_manager_lib",
@@ -52,6 +53,7 @@ envoy_cc_mock(
     name = "network_mocks",
     srcs = ["mocks.cc"],
     hdrs = ["mocks.h"],
+    rbe_pool = "6gig",
     deps = [
         ":connection_mocks",
         ":io_handle_mocks",
@@ -75,7 +77,7 @@ envoy_cc_mock(
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/listener/v3:pkg_cc_proto",
     ] + envoy_select_enable_http3([
-        "@com_github_google_quiche//:quic_platform_socket_address",
+        "@quiche//:quic_platform_socket_address",
     ]),
 )
 
@@ -89,6 +91,6 @@ envoy_cc_mock(
         "//source/common/network:listen_socket_lib",
         "//source/common/network:utility_lib",
     ] + envoy_select_enable_http3([
-        "@com_github_google_quiche//:quic_client_crypto_crypto_handshake_lib",
+        "@quiche//:quic_client_crypto_crypto_handshake_lib",
     ]),
 )

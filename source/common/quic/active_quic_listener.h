@@ -27,7 +27,7 @@ class ActiveQuicListener : public Envoy::Server::ActiveUdpListenerBase,
                            Logger::Loggable<Logger::Id::quic> {
 public:
   // TODO(bencebeky): Tune this value.
-  static const size_t kNumSessionsToCreatePerLoop = 16;
+  static constexpr size_t kNumSessionsToCreatePerLoop = 16;
 
   ActiveQuicListener(Runtime::Loader& runtime, uint32_t worker_index, uint32_t concurrency,
                      Event::Dispatcher& dispatcher, Network::UdpConnectionHandler& parent,
@@ -36,12 +36,13 @@ public:
                      bool kernel_worker_routing,
                      const envoy::config::core::v3::RuntimeFeatureFlag& enabled,
                      QuicStatNames& quic_stat_names,
-                     uint32_t packets_to_read_to_connection_count_ratio, bool receive_ecn,
+                     uint32_t packets_to_read_to_connection_count_ratio,
                      EnvoyQuicCryptoServerStreamFactoryInterface& crypto_server_stream_factory,
                      EnvoyQuicProofSourceFactoryInterface& proof_source_factory,
                      QuicConnectionIdGeneratorPtr&& cid_generator,
                      QuicConnectionIdWorkerSelector worker_selector,
-                     EnvoyQuicConnectionDebugVisitorFactoryInterfaceOptRef debug_visitor_factory);
+                     EnvoyQuicConnectionDebugVisitorFactoryInterfaceOptRef debug_visitor_factory,
+                     bool reject_new_connections = false);
 
   ~ActiveQuicListener() override;
 
@@ -101,6 +102,10 @@ private:
   // During hot restart, an optional handler for packets that weren't for existing connections.
   OptRef<Network::NonDispatchedUdpPacketHandler> non_dispatched_udp_packet_handler_;
   Network::IoHandle::UdpSaveCmsgConfig udp_save_cmsg_config_;
+  // Maximum number of QUIC sessions to create per event loop.
+  // This is an equivalent of max_connections_to_accept_per_socket_event for TCP
+  // listeners.
+  uint32_t max_sessions_per_event_loop_;
 };
 
 using ActiveQuicListenerPtr = std::unique_ptr<ActiveQuicListener>;
@@ -112,7 +117,7 @@ public:
   ActiveQuicListenerFactory(const envoy::config::listener::v3::QuicProtocolOptions& config,
                             uint32_t concurrency, QuicStatNames& quic_stat_names,
                             ProtobufMessage::ValidationVisitor& validation_visitor,
-                            Server::Configuration::ServerFactoryContext& context);
+                            Server::Configuration::ListenerFactoryContext& context);
 
   // Network::ActiveUdpListenerFactory.
   Network::ConnectionHandler::ActiveUdpListenerPtr
@@ -146,7 +151,7 @@ private:
       crypto_server_stream_factory_;
   absl::optional<std::reference_wrapper<EnvoyQuicProofSourceFactoryInterface>>
       proof_source_factory_;
-  EnvoyQuicConnectionDebugVisitorFactoryInterfaceOptRef connection_debug_visitor_factory_;
+  EnvoyQuicConnectionDebugVisitorFactoryInterfacePtr connection_debug_visitor_factory_;
   EnvoyQuicConnectionIdGeneratorFactoryPtr quic_cid_generator_factory_;
   EnvoyQuicServerPreferredAddressConfigPtr server_preferred_address_config_;
   quic::QuicConfig quic_config_;
@@ -154,11 +159,11 @@ private:
   envoy::config::core::v3::RuntimeFeatureFlag enabled_;
   QuicStatNames& quic_stat_names_;
   const uint32_t packets_to_read_to_connection_count_ratio_;
-  bool receive_ecn_;
   const Network::Socket::OptionsSharedPtr options_{std::make_shared<Network::Socket::Options>()};
   QuicConnectionIdWorkerSelector worker_selector_;
   bool kernel_worker_routing_{};
-  Server::Configuration::ServerFactoryContext& context_;
+  Server::Configuration::ListenerFactoryContext& context_;
+  bool reject_new_connections_{};
 
   static bool disable_kernel_bpf_packet_routing_for_test_;
 };

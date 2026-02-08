@@ -162,6 +162,13 @@ static_assert(IP_RECVDSTADDR == IP_SENDSRCADDR);
 #define ENVOY_IP_PKTINFO IP_PKTINFO
 #endif
 
+#ifdef IP_BIND_ADDRESS_NO_PORT
+#define ENVOY_SOCKET_IP_BIND_ADDRESS_NO_PORT                                                       \
+  ENVOY_MAKE_SOCKET_OPTION_NAME(IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT)
+#else
+#define ENVOY_SOCKET_IP_BIND_ADDRESS_NO_PORT Network::SocketOptionName()
+#endif
+
 #define ENVOY_SELF_IP_ADDR ENVOY_MAKE_SOCKET_OPTION_NAME(IPPROTO_IP, ENVOY_IP_PKTINFO)
 
 // Both Linux and FreeBSD use IPV6_RECVPKTINFO for both sending source address and
@@ -175,19 +182,26 @@ static_assert(IP_RECVDSTADDR == IP_SENDSRCADDR);
 #define ENVOY_ATTACH_REUSEPORT_CBPF Network::SocketOptionName()
 #endif
 
-/**
- * Interface representing a single filter chain info.
- */
-class FilterChainInfo {
-public:
-  virtual ~FilterChainInfo() = default;
+#if !defined(ANDROID) && defined(__APPLE__)
+// Only include TargetConditionals after testing ANDROID as some Android builds
+// on the Mac have this header available and it's not needed unless the target
+// is really an Apple platform.
+#include <TargetConditionals.h>
+#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE
+// MAC_OS
+#define ENVOY_IP_DONTFRAG ENVOY_MAKE_SOCKET_OPTION_NAME(IPPROTO_IP, IP_DONTFRAG)
+#define ENVOY_IPV6_DONTFRAG ENVOY_MAKE_SOCKET_OPTION_NAME(IPPROTO_IPV6, IPV6_DONTFRAG)
+#endif
+#endif
 
-  /**
-   * @return the name of this filter chain.
-   */
-  virtual absl::string_view name() const PURE;
-};
+#if !defined(ENVOY_IP_DONTFRAG) && defined(IP_PMTUDISC_DO)
+#define ENVOY_IP_MTU_DISCOVER ENVOY_MAKE_SOCKET_OPTION_NAME(IPPROTO_IP, IP_MTU_DISCOVER)
+#define ENVOY_IP_MTU_DISCOVER_VALUE IP_PMTUDISC_DO
+#define ENVOY_IPV6_MTU_DISCOVER ENVOY_MAKE_SOCKET_OPTION_NAME(IPPROTO_IPV6, IPV6_MTU_DISCOVER)
+#define ENVOY_IPV6_MTU_DISCOVER_VALUE IPV6_PMTUDISC_DO
+#endif
 
+class FilterChainInfo;
 class ListenerInfo;
 
 using FilterChainInfoConstSharedPtr = std::shared_ptr<const FilterChainInfo>;
@@ -205,6 +219,12 @@ public:
    * @return the local address of the socket.
    */
   virtual const Address::InstanceConstSharedPtr& localAddress() const PURE;
+
+  /**
+   * @return the direct local address of the socket. This is the listener address and it can not be
+   * modified by listener filters.
+   */
+  virtual const Address::InstanceConstSharedPtr& directLocalAddress() const PURE;
 
   /**
    * @return true if the local address has been restored to a value that is different from the
@@ -227,6 +247,11 @@ public:
    * @return SNI value for downstream host.
    */
   virtual absl::string_view requestedServerName() const PURE;
+
+  /**
+   * @return requestedApplicationProtocols value for downstream host.
+   */
+  virtual const std::vector<std::string>& requestedApplicationProtocols() const PURE;
 
   /**
    * @return Connection ID of the downstream connection, or unset if not available.
@@ -257,6 +282,11 @@ public:
    * @return ja3 fingerprint hash of the downstream connection, if any.
    */
   virtual absl::string_view ja3Hash() const PURE;
+
+  /**
+   * @return ja4 fingerprint hash of the downstream connection, if any.
+   */
+  virtual absl::string_view ja4Hash() const PURE;
 
   /**
    * @return roundTripTime of the connection
@@ -308,6 +338,12 @@ public:
   virtual void setRequestedServerName(const absl::string_view requested_server_name) PURE;
 
   /**
+   * @param protocols Application protocols requested.
+   */
+  virtual void
+  setRequestedApplicationProtocols(const std::vector<absl::string_view>& protocols) PURE;
+
+  /**
    * @param id Connection ID of the downstream connection.
    **/
   virtual void setConnectionID(uint64_t id) PURE;
@@ -333,6 +369,11 @@ public:
    * @param JA3 fingerprint.
    */
   virtual void setJA3Hash(const absl::string_view ja3_hash) PURE;
+
+  /**
+   * @param JA4 fingerprint.
+   */
+  virtual void setJA4Hash(const absl::string_view ja4_hash) PURE;
 
   /**
    * @param  milliseconds of round trip time of previous connection

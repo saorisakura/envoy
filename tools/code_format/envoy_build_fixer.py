@@ -92,7 +92,7 @@ def fix_package_and_license(path, contents):
 
     # Ensure we have an envoy_package / envoy_mobile_package import load if this is a real Envoy package.
     # We also allow the prefix to be overridden if envoy is included in a larger workspace.
-    if re.search(ENVOY_RULE_REGEX, contents):
+    if "tools/" not in path and re.search(ENVOY_RULE_REGEX, contents):
         new_load = 'new_load {}//bazel:envoy_build_system.bzl %s' % package_string
         contents = run_buildozer([
             (new_load.format(os.getenv("ENVOY_BAZEL_PREFIX", "")), '__pkg__'),
@@ -181,9 +181,8 @@ def fix_api_deps(path, contents):
         existing_api_deps = set([])
         if deps != 'missing':
             existing_api_deps = set([
-                d for d in deps.split()
-                if d.startswith('@envoy_api') and d.endswith('pkg_cc_proto')
-                and d != '@com_github_cncf_xds//udpa/annotations:pkg_cc_proto'
+                d for d in deps.split() if d.startswith('@envoy_api')
+                and d.endswith('pkg_cc_proto') and d != '@xds//udpa/annotations:pkg_cc_proto'
             ])
         deps_to_remove = existing_api_deps.difference(actual_api_deps)
         if deps_to_remove:

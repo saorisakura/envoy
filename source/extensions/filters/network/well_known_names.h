@@ -59,6 +59,14 @@ public:
   const std::string ZooKeeperProxy = "envoy.filters.network.zookeeper_proxy";
   // WebAssembly filter
   const std::string Wasm = "envoy.filters.network.wasm";
+  // Network external processor filter
+  const std::string NetworkExternalProcessor = "envoy.filters.network.ext_proc";
+  // Geoip network filter
+  const std::string Geoip = "envoy.filters.network.geoip";
+  // Network match delegate filter
+  const std::string NetworkMatchDelegate = "envoy.filters.network.match_delegate";
+  // Reverse tunnel filter
+  const std::string ReverseTunnel = "envoy.filters.network.reverse_tunnel";
 };
 
 using NetworkFilterNames = ConstSingleton<NetworkFilterNameValues>;

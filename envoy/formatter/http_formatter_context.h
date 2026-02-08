@@ -11,12 +11,20 @@ namespace Formatter {
 using AccessLogType = envoy::data::accesslog::v3::AccessLogType;
 
 /**
- * HTTP specific substitution formatter context for HTTP access logs or formatters.
- * TODO(wbpcode): maybe we should move this class to envoy/http folder and rename it
- * for more general usage.
+ * Substitution formatter context for access logs or formatters.
  */
-class HttpFormatterContext {
+class Context {
 public:
+  /**
+   * Interface for a context extension which can be used to provide non-HTTP specific data to
+   * formatters. This could be used for non-HTTP protocols to provide protocol specific data to
+   * formatters.
+   */
+  class Extension {
+  public:
+    virtual ~Extension() = default;
+  };
+
   /**
    * Constructor that uses the provided request/response headers, response trailers, local reply
    * body, and access log type. Any of the parameters can be nullptr/empty.
@@ -28,26 +36,31 @@ public:
    * @param log_type supplies the access log type.
    * @param active_span supplies the active span.
    */
-  HttpFormatterContext(const Http::RequestHeaderMap* request_headers = nullptr,
-                       const Http::ResponseHeaderMap* response_headers = nullptr,
-                       const Http::ResponseTrailerMap* response_trailers = nullptr,
-                       absl::string_view local_reply_body = {},
-                       AccessLogType log_type = AccessLogType::NotSet,
-                       const Tracing::Span* active_span = nullptr);
+  Context(const Http::RequestHeaderMap* request_headers = nullptr,
+          const Http::ResponseHeaderMap* response_headers = nullptr,
+          const Http::ResponseTrailerMap* response_trailers = nullptr,
+          absl::string_view local_reply_body = {}, AccessLogType log_type = AccessLogType::NotSet,
+          const Tracing::Span* active_span = nullptr)
+      : local_reply_body_(local_reply_body), request_headers_(makeOptRefFromPtr(request_headers)),
+        response_headers_(makeOptRefFromPtr(response_headers)),
+        response_trailers_(makeOptRefFromPtr(response_trailers)),
+        active_span_(makeOptRefFromPtr(active_span)), log_type_(log_type) {}
+
   /**
    * Set or overwrite the request headers.
    * @param request_headers supplies the request headers.
    */
-  HttpFormatterContext& setRequestHeaders(const Http::RequestHeaderMap& request_headers) {
-    request_headers_ = &request_headers;
+  Context& setRequestHeaders(const Http::RequestHeaderMap& request_headers) {
+    request_headers_ = request_headers;
     return *this;
   }
+
   /**
    * Set or overwrite the response headers.
    * @param response_headers supplies the response headers.
    */
-  HttpFormatterContext& setResponseHeaders(const Http::ResponseHeaderMap& response_headers) {
-    response_headers_ = &response_headers;
+  Context& setResponseHeaders(const Http::ResponseHeaderMap& response_headers) {
+    response_headers_ = response_headers;
     return *this;
   }
 
@@ -55,8 +68,8 @@ public:
    * Set or overwrite the response trailers.
    * @param response_trailers supplies the response trailers.
    */
-  HttpFormatterContext& setResponseTrailers(const Http::ResponseTrailerMap& response_trailers) {
-    response_trailers_ = &response_trailers;
+  Context& setResponseTrailers(const Http::ResponseTrailerMap& response_trailers) {
+    response_trailers_ = response_trailers;
     return *this;
   }
 
@@ -64,7 +77,7 @@ public:
    * Set or overwrite the local reply body.
    * @param local_reply_body supplies the local reply body.
    */
-  HttpFormatterContext& setLocalReplyBody(absl::string_view local_reply_body) {
+  Context& setLocalReplyBody(absl::string_view local_reply_body) {
     local_reply_body_ = local_reply_body;
     return *this;
   }
@@ -73,75 +86,81 @@ public:
    * Set or overwrite the access log type.
    * @param log_type supplies the access log type.
    */
-  HttpFormatterContext& setAccessLogType(AccessLogType log_type) {
+  Context& setAccessLogType(AccessLogType log_type) {
     log_type_ = log_type;
     return *this;
   }
 
   /**
-   * @return const Http::RequestHeaderMap& the request headers. Empty request header map if no
-   * request headers are available.
+   * @return OptRef<const Http::RequestHeaderMap> the request headers.
    */
-  const Http::RequestHeaderMap& requestHeaders() const;
+  OptRef<const Http::RequestHeaderMap> requestHeaders() const { return request_headers_; }
 
   /**
-   * @return false if no request headers are available.
+   * @return OptRef<const Http::ResponseHeaderMap> the response headers.
    */
-  bool hasRequestHeaders() const { return request_headers_ != nullptr; }
+  OptRef<const Http::ResponseHeaderMap> responseHeaders() const { return response_headers_; }
 
   /**
-   * @return const Http::ResponseHeaderMap& the response headers. Empty response header map if
-   * no response headers are available.
+   * @return OptRef<const Http::ResponseTrailerMap> the response trailers.
    */
-  const Http::ResponseHeaderMap& responseHeaders() const;
-
-  /**
-   * @return false if no response headers are available.
-   */
-  bool hasResponseHeaders() const { return response_headers_ != nullptr; }
-
-  /**
-   * @return const Http::ResponseTrailerMap& the response trailers. Empty response trailer map
-   * if no response trailers are available.
-   */
-  const Http::ResponseTrailerMap& responseTrailers() const;
-
-  /**
-   * @return false if no response trailers are available.
-   */
-  bool hasResponseTrailers() const { return response_trailers_ != nullptr; }
+  OptRef<const Http::ResponseTrailerMap> responseTrailers() const { return response_trailers_; }
 
   /**
    * @return absl::string_view the local reply body. Empty if no local reply body.
    */
-  absl::string_view localReplyBody() const;
+  absl::string_view localReplyBody() const { return local_reply_body_; }
 
   /**
    * @return AccessLog::AccessLogType the type of access log. NotSet if this is not used for
    * access logging.
    */
-  AccessLogType accessLogType() const;
+  AccessLogType accessLogType() const { return log_type_; }
 
   /**
-   * @return const Tracing::Span& the active span.
+   * Set or overwrite the active span.
+   * @param active_span supplies the active span.
    */
-  const Tracing::Span& activeSpan() const;
+  Context& setActiveSpan(const Tracing::Span& active_span) {
+    active_span_ = makeOptRefFromPtr(&active_span);
+    return *this;
+  }
 
   /**
-   * @return short category name of the HttpFormatterContext. This may be used to create
-   * an actual fully qualified category name for other factory classes that use this context.
-   * For example the http specific built-in formatters will have a category of
-   * "envoy.built_in_formatters.http".
+   * @return OptRef<const Tracing::Span> the active span.
    */
-  static constexpr absl::string_view category() { return "http"; }
+  OptRef<const Tracing::Span> activeSpan() const { return active_span_; }
+
+  /**
+   * Set the context extension.
+   * @param extension supplies the context extension.
+   */
+  Context& setExtension(const Extension& extension) {
+    extension_ = extension;
+    return *this;
+  }
+
+  /**
+   * @return OptRef<const ContextExtension> the context extension.
+   */
+  OptRef<const Extension> extension() const { return extension_; }
+
+  /**
+   * @return OptRef<const ExtensionType> the context extension casted to the specified type.
+   */
+  template <class Type> OptRef<const Type> typedExtension() const {
+    const Type* typed_extension = dynamic_cast<const Type*>(extension_.ptr());
+    return makeOptRefFromPtr(typed_extension);
+  }
 
 private:
-  const Http::RequestHeaderMap* request_headers_{};
-  const Http::ResponseHeaderMap* response_headers_{};
-  const Http::ResponseTrailerMap* response_trailers_{};
-  absl::string_view local_reply_body_{};
+  absl::string_view local_reply_body_;
+  OptRef<const Http::RequestHeaderMap> request_headers_;
+  OptRef<const Http::ResponseHeaderMap> response_headers_;
+  OptRef<const Http::ResponseTrailerMap> response_trailers_;
+  OptRef<const Extension> extension_;
+  OptRef<const Tracing::Span> active_span_;
   AccessLogType log_type_{AccessLogType::NotSet};
-  const Tracing::Span* active_span_ = nullptr;
 };
 
 } // namespace Formatter

@@ -48,26 +48,42 @@ absl::StatusOr<std::unique_ptr<ClientContextImpl>>
 ClientContextImpl::create(Stats::Scope& scope, const Envoy::Ssl::ClientContextConfig& config,
                           Server::Configuration::CommonFactoryContext& factory_context) {
   absl::Status creation_status = absl::OkStatus();
-  auto ret = std::unique_ptr<ClientContextImpl>(
-      new ClientContextImpl(scope, config, factory_context, creation_status));
+  auto ret = std::unique_ptr<ClientContextImpl>(new ClientContextImpl(
+      scope, config, config.tlsCertificates(), true, factory_context, creation_status));
   RETURN_IF_NOT_OK(creation_status);
   return ret;
 }
 
-ClientContextImpl::ClientContextImpl(Stats::Scope& scope,
-                                     const Envoy::Ssl::ClientContextConfig& config,
-                                     Server::Configuration::CommonFactoryContext& factory_context,
-                                     absl::Status& creation_status)
-    : ContextImpl(scope, config, factory_context, nullptr /* additional_init */, creation_status),
+ClientContextImpl::ClientContextImpl(
+    Stats::Scope& scope, const Envoy::Ssl::ClientContextConfig& config,
+    const std::vector<std::reference_wrapper<const Ssl::TlsCertificateConfig>>& tls_certificates,
+    bool add_selector, Server::Configuration::CommonFactoryContext& factory_context,
+    absl::Status& creation_status)
+    : ContextImpl(scope, config, tls_certificates, factory_context, nullptr /* additional_init */,
+                  creation_status),
       server_name_indication_(config.serverNameIndication()),
+      auto_host_sni_(config.autoHostServerNameIndication()),
       allow_renegotiation_(config.allowRenegotiation()),
       enforce_rsa_key_usage_(config.enforceRsaKeyUsage()),
       max_session_keys_(config.maxSessionKeys()) {
   if (!creation_status.ok()) {
     return;
   }
+
+  // Disallow insecure configuration.
+  if (config.autoSniSanMatch() && config.certificateValidationContext() == nullptr) {
+    creation_status = absl::InvalidArgumentError(
+        "'auto_sni_san_validation' was configured without a validation context");
+    return;
+  }
+
   // This should be guaranteed during configuration ingestion for client contexts.
-  ASSERT(tls_contexts_.size() == 1);
+  if (tls_contexts_.size() != 1) {
+    creation_status =
+        absl::InvalidArgumentError("Client TLS context supports only a single certificate");
+    return;
+  }
+
   if (!parsed_alpn_protocols_.empty()) {
     for (auto& ctx : tls_contexts_) {
       const int rc = SSL_CTX_set_alpn_protos(ctx.ssl_ctx_.get(), parsed_alpn_protocols_.data(),
@@ -87,20 +103,40 @@ ClientContextImpl::ClientContextImpl(Stats::Scope& scope,
           return client_context_impl->newSessionKey(session);
         });
   }
+
+  if (add_selector) {
+    if (auto factory = config.tlsCertificateSelectorFactory(); factory) {
+      tls_certificate_selector_ = factory->createUpstreamTlsCertificateSelector(*this);
+      SSL_CTX_set_cert_cb(
+          tls_contexts_[0].ssl_ctx_.get(),
+          [](SSL* ssl, void*) -> int {
+            return static_cast<ClientContextImpl*>(SSL_CTX_get_app_data(SSL_get_SSL_CTX(ssl)))
+                ->selectTlsContext(ssl);
+          },
+          nullptr);
+    }
+  }
 }
 
 absl::StatusOr<bssl::UniquePtr<SSL>>
-ClientContextImpl::newSsl(const Network::TransportSocketOptionsConstSharedPtr& options) {
-  absl::StatusOr<bssl::UniquePtr<SSL>> ssl_con_or_status(ContextImpl::newSsl(options));
+ClientContextImpl::newSsl(const Network::TransportSocketOptionsConstSharedPtr& options,
+                          Upstream::HostDescriptionConstSharedPtr host) {
+  absl::StatusOr<bssl::UniquePtr<SSL>> ssl_con_or_status(ContextImpl::newSsl(options, host));
   if (!ssl_con_or_status.ok()) {
     return ssl_con_or_status;
   }
 
   bssl::UniquePtr<SSL> ssl_con = std::move(ssl_con_or_status.value());
 
-  const std::string server_name_indication = options && options->serverNameOverride().has_value()
-                                                 ? options->serverNameOverride().value()
-                                                 : server_name_indication_;
+  std::string server_name_indication;
+  if (options && options->serverNameOverride().has_value()) {
+    server_name_indication = options->serverNameOverride().value();
+  } else if (auto_host_sni_ && host != nullptr && !host->hostname().empty()) {
+    server_name_indication = host->hostname();
+  } else {
+    server_name_indication = server_name_indication_;
+  }
+
   if (!server_name_indication.empty()) {
     const int rc = SSL_set_tlsext_host_name(ssl_con.get(), server_name_indication.c_str());
     if (rc != 1) {
@@ -145,7 +181,7 @@ ClientContextImpl::newSsl(const Network::TransportSocketOptionsConstSharedPtr& o
   if (max_session_keys_ > 0) {
     if (session_keys_single_use_) {
       // Stored single-use session keys, use write/write locks.
-      absl::WriterMutexLock l(&session_keys_mu_);
+      absl::WriterMutexLock l(session_keys_mu_);
       if (!session_keys_.empty()) {
         // Use the most recently stored session key, since it has the highest
         // probability of still being recognized/accepted by the server.
@@ -158,7 +194,7 @@ ClientContextImpl::newSsl(const Network::TransportSocketOptionsConstSharedPtr& o
       }
     } else {
       // Never stored single-use session keys, use read/write locks.
-      absl::ReaderMutexLock l(&session_keys_mu_);
+      absl::ReaderMutexLock l(session_keys_mu_);
       if (!session_keys_.empty()) {
         // Use the most recently stored session key, since it has the highest
         // probability of still being recognized/accepted by the server.
@@ -177,7 +213,7 @@ int ClientContextImpl::newSessionKey(SSL_SESSION* session) {
   if (SSL_SESSION_should_be_single_use(session)) {
     session_keys_single_use_ = true;
   }
-  absl::WriterMutexLock l(&session_keys_mu_);
+  absl::WriterMutexLock l(session_keys_mu_);
   // Evict oldest entries.
   while (session_keys_.size() >= max_session_keys_) {
     session_keys_.pop_back();
@@ -185,6 +221,68 @@ int ClientContextImpl::newSessionKey(SSL_SESSION* session) {
   // Add new session key at the front of the queue, so that it's used first.
   session_keys_.push_front(bssl::UniquePtr<SSL_SESSION>(session));
   return 1; // Tell BoringSSL that we took ownership of the session.
+}
+
+// This callback should return 1 on success, 0 on internal error, and negative number
+// on failure or pause a handshake.
+int ClientContextImpl::selectTlsContext(SSL* ssl) {
+  ASSERT(tls_certificate_selector_ != nullptr);
+
+  auto* extended_socket_info = reinterpret_cast<Envoy::Ssl::SslExtendedSocketInfo*>(
+      SSL_get_ex_data(ssl, ContextImpl::sslExtendedSocketInfoIndex()));
+
+  auto selection_result = extended_socket_info->certificateSelectionResult();
+  switch (selection_result) {
+  case Ssl::CertificateSelectionStatus::NotStarted:
+    // continue
+    break;
+
+  case Ssl::CertificateSelectionStatus::Pending:
+    ENVOY_LOG(trace, "already waiting certificate");
+    return -1;
+
+  case Ssl::CertificateSelectionStatus::Successful:
+    ENVOY_LOG(trace, "wait certificate success");
+    return 1;
+
+  default:
+    ENVOY_LOG(trace, "wait certificate failed");
+    return 0;
+  }
+
+  ENVOY_LOG(trace, "upstream TLS context selection result: {}, before selectTlsContext",
+            static_cast<int>(selection_result));
+  auto transport_socket_options_shared_ptr_ptr =
+      static_cast<const Network::TransportSocketOptionsConstSharedPtr*>(SSL_get_app_data(ssl));
+  ASSERT(transport_socket_options_shared_ptr_ptr);
+
+  const auto result = tls_certificate_selector_->selectTlsContext(
+      *ssl, *transport_socket_options_shared_ptr_ptr,
+      extended_socket_info->createCertificateSelectionCallback());
+
+  ENVOY_LOG(trace,
+            "upstream TLS context selection result: {}, after selectTlsContext, selection result "
+            "status: {}",
+            static_cast<int>(extended_socket_info->certificateSelectionResult()),
+            static_cast<int>(result.status));
+  ASSERT(extended_socket_info->certificateSelectionResult() ==
+             Ssl::CertificateSelectionStatus::Pending,
+         "invalid selection result");
+
+  extended_socket_info->setCertSelectionHandle(std::move(result.handle));
+  switch (result.status) {
+  case Ssl::SelectionResult::SelectionStatus::Success:
+    extended_socket_info->onCertificateSelectionCompleted(*result.selected_ctx, result.staple,
+                                                          false);
+    return 1;
+  case Ssl::SelectionResult::SelectionStatus::Pending:
+    return -1;
+  case Ssl::SelectionResult::SelectionStatus::Failed:
+    extended_socket_info->onCertificateSelectionCompleted(OptRef<const Ssl::TlsContext>(), false,
+                                                          false);
+    return 0;
+  }
+  PANIC_DUE_TO_CORRUPT_ENUM;
 }
 
 } // namespace Tls

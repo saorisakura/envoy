@@ -20,14 +20,18 @@ envoy_extension_cc_test(
     name = "compressor_filter_test",
     srcs = [
         "compressor_filter_test.cc",
+        "compressor_filter_testing_peer.h",
     ],
     extension_names = ["envoy.filters.http.compressor"],
+    rbe_pool = "6gig",
     deps = [
         "//source/extensions/compression/gzip/compressor:config",
         "//source/extensions/filters/http/compressor:compressor_filter_lib",
         "//test/mocks/compression/compressor:compressor_mocks",
         "//test/mocks/http:http_mocks",
+        "//test/mocks/protobuf:protobuf_mocks",
         "//test/mocks/runtime:runtime_mocks",
+        "//test/mocks/server:factory_context_mocks",
         "//test/test_common:utility_lib",
     ],
 )
@@ -39,13 +43,18 @@ envoy_extension_cc_test(
         "compressor_filter_integration_test.cc",
     ],
     extension_names = ["envoy.filters.http.compressor"],
+    rbe_pool = "6gig",
     deps = [
+        "//source/extensions/compression/brotli/compressor:config",
+        "//source/extensions/compression/brotli/decompressor:config",
         "//source/extensions/compression/gzip/compressor:config",
         "//source/extensions/compression/gzip/decompressor:config",
         "//source/extensions/filters/http/compressor:config",
         "//test/integration:http_integration_lib",
         "//test/test_common:simulated_time_system_lib",
         "//test/test_common:utility_lib",
+        "@envoy_api//envoy/extensions/compression/brotli/compressor/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/compression/gzip/compressor/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/http/compressor/v3:pkg_cc_proto",
     ],
 )
@@ -61,11 +70,14 @@ envoy_extension_cc_test(
         "config_test.cc",
     ],
     extension_names = ["envoy.filters.http.compressor"],
+    rbe_pool = "6gig",
     deps = [
         ":mock_config_cc_proto",
+        "//source/extensions/compression/common/compressor:compressor_factory_base_lib",
         "//source/extensions/filters/http/compressor:config",
         "//test/mocks/runtime:runtime_mocks",
         "//test/mocks/server:factory_context_mocks",
+        "//test/test_common:registry_lib",
         "//test/test_common:utility_lib",
     ],
 )
@@ -73,10 +85,7 @@ envoy_extension_cc_test(
 envoy_cc_benchmark_binary(
     name = "compressor_filter_speed_test",
     srcs = ["compressor_filter_speed_test.cc"],
-    external_deps = [
-        "benchmark",
-        "googletest",
-    ],
+    rbe_pool = "6gig",
     deps = [
         "//envoy/compression/compressor:compressor_factory_interface",
         "//source/common/protobuf:utility_lib",
@@ -91,13 +100,16 @@ envoy_cc_benchmark_binary(
         "//test/mocks/runtime:runtime_mocks",
         "//test/test_common:printers_lib",
         "//test/test_common:utility_lib",
+        "@benchmark",
         "@envoy_api//envoy/extensions/filters/http/compressor/v3:pkg_cc_proto",
+        "@googletest//:gtest",
     ],
 )
 
 envoy_benchmark_test(
     name = "compressor_filter_speed_test_benchmark_test",
     benchmark_binary = "compressor_filter_speed_test",
+    rbe_pool = "6gig",
     # TODO(envoyproxy/windows-dev): diagnose clang-cl build test failure
     tags = ["fails_on_windows"],
 )
@@ -113,6 +125,7 @@ envoy_cc_test(
     srcs = [
         "compressor_integration_tests.cc",
     ],
+    rbe_pool = "6gig",
     deps = [
         ":compressor_integration_tests_lib",
         "//source/common/http:header_map_lib",

@@ -10,6 +10,8 @@
 #include "source/common/common/matchers.h"
 #include "source/common/http/async_client_impl.h"
 #include "source/common/http/codes.h"
+#include "source/common/http/utility.h"
+#include "source/common/router/retry_policy_impl.h"
 #include "source/common/runtime/runtime_features.h"
 #include "source/extensions/filters/common/ext_authz/check_request_utils.h"
 
@@ -32,21 +34,27 @@ const Http::HeaderMap& lengthZeroHeader() {
 }
 
 // Static response used for creating authorization ERROR responses.
+// Note: status_code is left unset so the filter can use the configured status_on_error
+// configuration.
 const Response& errorResponse() {
   CONSTRUCT_ON_FIRST_USE(Response, Response{CheckStatus::Error,
-                                            UnsafeHeaderVector{},
-                                            UnsafeHeaderVector{},
-                                            UnsafeHeaderVector{},
-                                            UnsafeHeaderVector{},
-                                            UnsafeHeaderVector{},
-                                            UnsafeHeaderVector{},
-                                            UnsafeHeaderVector{},
-                                            {{}},
+                                            HeaderMutationVector{},
+                                            HeaderMutationVector{},
+                                            HeaderMutationVector{},
+                                            false,
+                                            {},
                                             Http::Utility::QueryParamsVector{},
                                             {},
                                             EMPTY_STRING,
-                                            Http::Code::Forbidden,
-                                            ProtobufWkt::Struct{}});
+                                            static_cast<Http::Code>(0),
+                                            Protobuf::Struct{}});
+}
+
+// Static matcher that never matches anything. Used for matchers that are not applicable
+// in certain response contexts (e.g., upstream headers for denied responses).
+const MatcherSharedPtr& neverMatchingMatcher() {
+  CONSTRUCT_ON_FIRST_USE(MatcherSharedPtr, std::make_shared<HeaderKeyMatcher>(
+                                               std::vector<Matchers::StringMatcherPtr>{}));
 }
 
 // SuccessResponse used for creating either DENIED or OK authorization responses.
@@ -59,26 +67,39 @@ struct SuccessResponse {
         response_matchers_(response_matchers),
         to_dynamic_metadata_matchers_(dynamic_metadata_matchers),
         response_(std::make_unique<Response>(response)) {
-    headers_.iterate([this](const Http::HeaderEntry& header) -> Http::HeaderMap::Iterate {
-      // UpstreamHeaderMatcher
-      if (matchers_->matches(header.key().getStringView())) {
-        response_->headers_to_set.emplace_back(header.key().getStringView(),
-                                               header.value().getStringView());
+    const bool is_ok_response = response_->status == CheckStatus::OK;
+    headers_.iterate([this,
+                      is_ok_response](const Http::HeaderEntry& header) -> Http::HeaderMap::Iterate {
+      // UpstreamHeaderMatcher only applies to OK responses for upstream request headers.
+      if (is_ok_response && matchers_->matches(header.key().getStringView())) {
+        response_->request_header_mutations.push_back(
+            {std::string(header.key().getStringView()), std::string(header.value().getStringView()),
+             HeaderValueOption::OVERWRITE_IF_EXISTS_OR_ADD});
       }
-      if (append_matchers_->matches(header.key().getStringView())) {
+      if (is_ok_response && append_matchers_->matches(header.key().getStringView())) {
         // If there is an existing matching key in the current headers, the new entry will be
         // appended with the same key. For example, given {"key": "value1"} headers, if there is
         // a matching "key" from the authorization response headers {"key": "value2"}, the
         // request to upstream server will have two entries for "key": {"key": "value1", "key":
         // "value2"}.
-        response_->headers_to_add.emplace_back(header.key().getStringView(),
-                                               header.value().getStringView());
+        response_->request_header_mutations.push_back({std::string(header.key().getStringView()),
+                                                       std::string(header.value().getStringView()),
+                                                       HeaderValueOption::APPEND_IF_EXISTS_OR_ADD});
       }
       if (response_matchers_->matches(header.key().getStringView())) {
-        // For HTTP implementation, the response headers from the auth server will, by default, be
-        // appended (using addCopy) to the encoded response headers.
-        response_->response_headers_to_add.emplace_back(header.key().getStringView(),
-                                                        header.value().getStringView());
+        // For OK responses, these headers are appended to the encoded response headers.
+        // For Denied responses, these headers go to the local reply.
+        if (is_ok_response) {
+          response_->response_header_mutations.push_back(
+              {std::string(header.key().getStringView()),
+               std::string(header.value().getStringView()),
+               HeaderValueOption::APPEND_IF_EXISTS_OR_ADD});
+        } else {
+          response_->local_response_header_mutations.push_back(
+              {std::string(header.key().getStringView()),
+               std::string(header.value().getStringView()),
+               HeaderValueOption::APPEND_IF_EXISTS_OR_ADD});
+        }
       }
       if (to_dynamic_metadata_matchers_->matches(header.key().getStringView())) {
         const std::string key{header.key().getStringView()};
@@ -103,6 +124,25 @@ absl::StatusOr<std::string> validatePathPrefix(absl::string_view path_prefix) {
     return absl::InvalidArgumentError("path_prefix should start with \"/\".");
   }
   return std::string(path_prefix);
+}
+
+absl::StatusOr<Router::RetryPolicyConstSharedPtr>
+createRetryPolicy(const envoy::config::core::v3::RetryPolicy& core_retry_policy,
+                  Server::Configuration::CommonFactoryContext& context) {
+  // Convert core retry policy to route retry policy and create the implementation.
+  // By default when runtime flag is true, pass empty string to respect user's configured
+  // retry_on, not override it. When flag is false, use hardcoded defaults for backwards
+  // compatibility.
+  const std::string default_retry_on =
+      Runtime::runtimeFeatureEnabled(
+          "envoy.reloadable_features.ext_authz_http_client_retries_respect_user_retry_on")
+          ? ""
+          : "5xx,gateway-error,connect-failure,reset";
+  envoy::config::route::v3::RetryPolicy route_retry_policy =
+      Http::Utility::convertCoreToRouteRetryPolicy(core_retry_policy, default_retry_on);
+
+  return Router::RetryPolicyImpl::create(route_retry_policy, context.messageValidationVisitor(),
+                                         context);
 }
 
 } // namespace
@@ -131,7 +171,41 @@ ClientConfig::ClientConfig(const envoy::extensions::filters::http::ext_authz::v3
               config.http_service().authorization_request().headers_to_add(),
               envoy::config::core::v3::HeaderValueOption::OVERWRITE_IF_EXISTS_OR_ADD),
           Router::HeaderParserPtr)),
-      encode_raw_headers_(config.encode_raw_headers()) {}
+      encode_raw_headers_(config.encode_raw_headers()),
+      retry_policy_(config.http_service().has_retry_policy()
+                        ? THROW_OR_RETURN_VALUE(
+                              createRetryPolicy(config.http_service().retry_policy(), context),
+                              Router::RetryPolicyConstSharedPtr)
+                        : nullptr) {}
+
+ClientConfig::ClientConfig(
+    const envoy::extensions::filters::http::ext_authz::v3::HttpService& http_service,
+    bool encode_raw_headers, uint32_t timeout, Server::Configuration::CommonFactoryContext& context)
+    : client_header_matchers_(toClientMatchers(
+          http_service.authorization_response().allowed_client_headers(), context)),
+      client_header_on_success_matchers_(toClientMatchersOnSuccess(
+          http_service.authorization_response().allowed_client_headers_on_success(), context)),
+      to_dynamic_metadata_matchers_(toDynamicMetadataMatchers(
+          http_service.authorization_response().dynamic_metadata_from_headers(), context)),
+      upstream_header_matchers_(toUpstreamMatchers(
+          http_service.authorization_response().allowed_upstream_headers(), context)),
+      upstream_header_to_append_matchers_(toUpstreamMatchers(
+          http_service.authorization_response().allowed_upstream_headers_to_append(), context)),
+      cluster_name_(http_service.server_uri().cluster()), timeout_(timeout),
+      path_prefix_(
+          THROW_OR_RETURN_VALUE(validatePathPrefix(http_service.path_prefix()), std::string)),
+      tracing_name_(fmt::format("async {} egress", http_service.server_uri().cluster())),
+      request_headers_parser_(THROW_OR_RETURN_VALUE(
+          Router::HeaderParser::configure(
+              http_service.authorization_request().headers_to_add(),
+              envoy::config::core::v3::HeaderValueOption::OVERWRITE_IF_EXISTS_OR_ADD),
+          Router::HeaderParserPtr)),
+      encode_raw_headers_(encode_raw_headers),
+      retry_policy_(
+          http_service.has_retry_policy()
+              ? THROW_OR_RETURN_VALUE(createRetryPolicy(http_service.retry_policy(), context),
+                                      Router::RetryPolicyConstSharedPtr)
+              : nullptr) {}
 
 MatcherSharedPtr
 ClientConfig::toClientMatchersOnSuccess(const envoy::type::matcher::v3::ListStringMatcher& list,
@@ -160,9 +234,7 @@ ClientConfig::toClientMatchers(const envoy::type::matcher::v3::ListStringMatcher
   if (matchers.empty()) {
     envoy::type::matcher::v3::StringMatcher matcher;
     matcher.set_exact(Http::Headers::get().Host.get());
-    matchers.push_back(
-        std::make_unique<Matchers::StringMatcherImpl<envoy::type::matcher::v3::StringMatcher>>(
-            matcher, context));
+    matchers.push_back(std::make_unique<Matchers::StringMatcherImpl>(matcher, context));
 
     return std::make_shared<NotHeaderKeyMatcher>(std::move(matchers));
   }
@@ -176,9 +248,7 @@ ClientConfig::toClientMatchers(const envoy::type::matcher::v3::ListStringMatcher
   for (const auto& key : keys) {
     envoy::type::matcher::v3::StringMatcher matcher;
     matcher.set_exact(key.get());
-    matchers.push_back(
-        std::make_unique<Matchers::StringMatcherImpl<envoy::type::matcher::v3::StringMatcher>>(
-            matcher, context));
+    matchers.push_back(std::make_unique<Matchers::StringMatcherImpl>(matcher, context));
   }
 
   return std::make_shared<HeaderKeyMatcher>(std::move(matchers));
@@ -284,6 +354,12 @@ void RawHttpClientImpl::check(RequestCallbacks& callbacks,
 
     options.setSendXff(false);
 
+    // Apply retry policy if configured.
+    if (config_->retryPolicy() != nullptr) {
+      options.setRetryPolicy(config_->retryPolicy());
+      options.setBufferBodyForRetry(true);
+    }
+
     request_ = thread_local_cluster->httpAsyncClient().send(std::move(message), *this, options);
   }
 }
@@ -358,42 +434,39 @@ ResponsePtr RawHttpClientImpl::toResponse(Http::ResponseMessagePtr message) {
                        config_->clientHeaderOnSuccessMatchers(),
                        config_->dynamicMetadataMatchers(),
                        Response{CheckStatus::OK,
-                                UnsafeHeaderVector{},
-                                UnsafeHeaderVector{},
-                                UnsafeHeaderVector{},
-                                UnsafeHeaderVector{},
-                                UnsafeHeaderVector{},
-                                UnsafeHeaderVector{},
-                                UnsafeHeaderVector{},
+                                HeaderMutationVector{},
+                                HeaderMutationVector{},
+                                HeaderMutationVector{},
+                                false,
                                 std::move(headers_to_remove),
                                 Http::Utility::QueryParamsVector{},
                                 {},
                                 EMPTY_STRING,
                                 Http::Code::OK,
-                                ProtobufWkt::Struct{}}};
+                                Protobuf::Struct{}}};
     return std::move(ok.response_);
   }
 
   // Create a Denied authorization response.
+  // For denied responses, headers matching clientHeaderMatchers go to
+  // local_response_header_mutations for the local reply. The upstream request headers (matchers_,
+  // append_matchers_) are not used, so we pass never-matching matchers for those positions.
   SuccessResponse denied{message->headers(),
+                         neverMatchingMatcher(),
+                         neverMatchingMatcher(),
                          config_->clientHeaderMatchers(),
-                         config_->upstreamHeaderToAppendMatchers(),
-                         config_->clientHeaderOnSuccessMatchers(),
                          config_->dynamicMetadataMatchers(),
                          Response{CheckStatus::Denied,
-                                  UnsafeHeaderVector{},
-                                  UnsafeHeaderVector{},
-                                  UnsafeHeaderVector{},
-                                  UnsafeHeaderVector{},
-                                  UnsafeHeaderVector{},
-                                  UnsafeHeaderVector{},
-                                  UnsafeHeaderVector{},
-                                  {{}},
+                                  HeaderMutationVector{},
+                                  HeaderMutationVector{},
+                                  HeaderMutationVector{},
+                                  false,
+                                  {},
                                   Http::Utility::QueryParamsVector{},
                                   {},
                                   message->bodyAsString(),
                                   static_cast<Http::Code>(status_code),
-                                  ProtobufWkt::Struct{}}};
+                                  Protobuf::Struct{}}};
   return std::move(denied.response_);
 }
 

@@ -35,6 +35,8 @@ public:
   MOCK_METHOD(void, onPerTryTimeout, (UpstreamRequest & upstream_request));
   MOCK_METHOD(void, onPerTryIdleTimeout, (UpstreamRequest & upstream_request));
   MOCK_METHOD(void, onStreamMaxDurationReached, (UpstreamRequest & upstream_request));
+  MOCK_METHOD(void, setupRouteTimeoutForWebsocketUpgrade, ());
+  MOCK_METHOD(void, disableRouteTimeoutForWebsocketUpgrade, ());
 
   MOCK_METHOD(Envoy::Http::StreamDecoderFilterCallbacks*, callbacks, ());
   MOCK_METHOD(Upstream::ClusterInfoConstSharedPtr, cluster, ());
@@ -54,7 +56,7 @@ public:
   NiceMock<Server::Configuration::MockFactoryContext> context_;
   Stats::TestUtil::TestSymbolTable symbol_table_;
   Stats::StatNamePool pool_;
-  FilterConfig config_;
+  std::unique_ptr<FilterConfig> config_;
   std::shared_ptr<Upstream::MockClusterInfo> cluster_info_;
 };
 

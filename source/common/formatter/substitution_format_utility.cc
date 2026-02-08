@@ -69,18 +69,21 @@ const absl::optional<std::string> SubstitutionFormatUtils::getHostname() {
   return hostname;
 }
 
-const ProtobufWkt::Value& SubstitutionFormatUtils::unspecifiedValue() {
+const Protobuf::Value& SubstitutionFormatUtils::unspecifiedValue() {
   return ValueUtil::nullValue();
 }
 
-void SubstitutionFormatUtils::truncate(std::string& str, absl::optional<size_t> max_length) {
+bool SubstitutionFormatUtils::truncate(std::string& str, absl::optional<size_t> max_length) {
   if (!max_length) {
-    return;
+    return false;
   }
 
   if (str.length() > max_length.value()) {
     str.resize(max_length.value());
+    return true;
   }
+
+  return false;
 }
 
 absl::string_view SubstitutionFormatUtils::truncateStringView(absl::string_view str,
@@ -105,19 +108,10 @@ SubstitutionFormatUtils::parseSubcommandHeaders(absl::string_view subcommand) {
         absl::StrCat("More than 1 alternative header specified in token: ", subcommand));
   }
 
-  if (Runtime::runtimeFeatureEnabled("envoy.reloadable_features.consistent_header_validation")) {
-    if (!Http::HeaderUtility::headerNameIsValid(absl::AsciiStrToLower(main_header)) ||
-        !Http::HeaderUtility::headerNameIsValid(absl::AsciiStrToLower(alternative_header))) {
-      return absl::InvalidArgumentError(
-          "Invalid header configuration. Format string contains invalid characters.");
-    }
-  } else {
-    // The main and alternative header should not contain invalid characters {NUL, LR, CF}.
-    if (!Envoy::Http::validHeaderString(main_header) ||
-        !Envoy::Http::validHeaderString(alternative_header)) {
-      return absl::InvalidArgumentError(
-          "Invalid header configuration. Format string contains null or newline.");
-    }
+  if (!Http::HeaderUtility::headerNameIsValid(absl::AsciiStrToLower(main_header)) ||
+      !Http::HeaderUtility::headerNameIsValid(absl::AsciiStrToLower(alternative_header))) {
+    return absl::InvalidArgumentError(
+        "Invalid header configuration. Format string contains invalid characters.");
   }
   return {std::make_pair(main_header, alternative_header)};
 }

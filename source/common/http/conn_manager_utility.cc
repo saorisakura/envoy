@@ -10,12 +10,15 @@
 #include "source/common/common/enum_to_int.h"
 #include "source/common/common/utility.h"
 #include "source/common/http/conn_manager_config.h"
+#include "source/common/http/forward_client_cert.h"
 #include "source/common/http/header_utility.h"
 #include "source/common/http/headers.h"
 #include "source/common/http/http1/codec_impl.h"
 #include "source/common/http/http2/codec_impl.h"
+#include "source/common/http/matching/data_impl.h"
 #include "source/common/http/path_utility.h"
 #include "source/common/http/utility.h"
+#include "source/common/matcher/matcher.h"
 #include "source/common/network/utility.h"
 #include "source/common/runtime/runtime_features.h"
 #include "source/common/stream_info/utility.h"
@@ -35,10 +38,38 @@ absl::string_view getScheme(absl::string_view forwarded_proto, bool is_ssl) {
   return is_ssl ? Headers::get().SchemeValues.Https : Headers::get().SchemeValues.Http;
 }
 
+// Determines the scheme (http/https) based on PROXY protocol destination port if configured,
+// otherwise falls back to connection's TLS status.
+absl::string_view getSchemeFromProxyProtocolOrConnection(const Network::Connection& connection,
+                                                         const ConnectionManagerConfig& config) {
+  const auto& https_ports = config.httpsDestinationPorts();
+  const auto& http_ports = config.httpDestinationPorts();
+
+  // If the feature is configured and the local address was restored from PROXY protocol,
+  // try to infer the scheme from the destination port.
+  if ((!https_ports.empty() || !http_ports.empty()) &&
+      connection.connectionInfoProvider().localAddressRestored()) {
+    const Envoy::Network::Address::Ip* ip =
+        connection.connectionInfoProvider().localAddress()->ip();
+    if (ip != nullptr) {
+      uint32_t port = ip->port();
+      if (https_ports.contains(port)) {
+        return Headers::get().SchemeValues.Https;
+      }
+      if (http_ports.contains(port)) {
+        return Headers::get().SchemeValues.Http;
+      }
+    }
+  }
+
+  // Fall back to connection's TLS status.
+  return connection.ssl() ? Headers::get().SchemeValues.Https : Headers::get().SchemeValues.Http;
+}
+
 } // namespace
 std::string ConnectionManagerUtility::determineNextProtocol(Network::Connection& connection,
                                                             const Buffer::Instance& data) {
-  const std::string next_protocol = connection.nextProtocol();
+  std::string next_protocol = connection.nextProtocol();
   if (!next_protocol.empty()) {
     return next_protocol;
   }
@@ -73,6 +104,16 @@ ServerConnectionPtr ConnectionManagerUtility::autoCreateCodec(
     return std::make_unique<Http1::ServerConnectionImpl>(
         connection, stats, callbacks, http1_settings, max_request_headers_kb,
         max_request_headers_count, headers_with_underscores_action, overload_manager);
+  }
+}
+
+void ConnectionManagerUtility::appendXff(RequestHeaderMap& request_headers,
+                                         Network::Connection& connection,
+                                         ConnectionManagerConfig& config) {
+  if (Network::Utility::isLoopbackAddress(*connection.connectionInfoProvider().remoteAddress())) {
+    Utility::appendXff(request_headers, config.localAddress());
+  } else {
+    Utility::appendXff(request_headers, *connection.connectionInfoProvider().remoteAddress());
   }
 }
 
@@ -134,19 +175,14 @@ ConnectionManagerUtility::MutateRequestHeadersResult ConnectionManagerUtility::m
       final_remote_address = connection.connectionInfoProvider().remoteAddress();
     }
     if (!config.skipXffAppend()) {
-      if (Network::Utility::isLoopbackAddress(
-              *connection.connectionInfoProvider().remoteAddress())) {
-        Utility::appendXff(request_headers, config.localAddress());
-      } else {
-        Utility::appendXff(request_headers, *connection.connectionInfoProvider().remoteAddress());
-      }
+      appendXff(request_headers, connection, config);
     }
     // If the prior hop is not a trusted proxy, overwrite any
     // x-forwarded-proto/x-forwarded-port value it set as untrusted. Alternately if no
     // x-forwarded-proto/x-forwarded-port header exists, add one if configured.
     if (xff_num_trusted_hops == 0 || request_headers.ForwardedProto() == nullptr) {
       request_headers.setReferenceForwardedProto(
-          connection.ssl() ? Headers::get().SchemeValues.Https : Headers::get().SchemeValues.Http);
+          getSchemeFromProxyProtocolOrConnection(connection, config));
     }
     if (config.appendXForwardedPort() &&
         (xff_num_trusted_hops == 0 || request_headers.ForwardedPort() == nullptr)) {
@@ -171,6 +207,9 @@ ConnectionManagerUtility::MutateRequestHeadersResult ConnectionManagerUtility::m
       if (result.reject_options.has_value()) {
         return {nullptr, result.reject_options};
       }
+      if (!result.skip_xff_append) {
+        appendXff(request_headers, connection, config);
+      }
 
       if (result.detected_remote_address) {
         final_remote_address = result.detected_remote_address;
@@ -183,8 +222,8 @@ ConnectionManagerUtility::MutateRequestHeadersResult ConnectionManagerUtility::m
   // If the x-forwarded-proto header is not set, set it here, since Envoy uses it for determining
   // scheme and communicating it upstream.
   if (!request_headers.ForwardedProto()) {
-    request_headers.setReferenceForwardedProto(connection.ssl() ? Headers::get().SchemeValues.Https
-                                                                : Headers::get().SchemeValues.Http);
+    request_headers.setReferenceForwardedProto(
+        getSchemeFromProxyProtocolOrConnection(connection, config));
   }
 
   // Usually, the x-forwarded-port header comes with x-forwarded-proto header. If the
@@ -270,11 +309,8 @@ ConnectionManagerUtility::MutateRequestHeadersResult ConnectionManagerUtility::m
 
   // Generate x-request-id for all edge requests, or if there is none.
   if (config.generateRequestId()) {
-    auto rid_extension = config.requestIDExtension();
-    // Unconditionally set a request ID if we are allowed to override it from
-    // the edge. Otherwise just ensure it is set.
-    const bool force_set = !config.preserveExternalRequestId() && edge_request;
-    rid_extension->set(request_headers, force_set);
+    config.requestIDExtension()->set(request_headers, edge_request,
+                                     config.preserveExternalRequestId());
   }
 
   if (connection.connecting() && request_headers.get(Headers::get().EarlyData).empty()) {
@@ -284,16 +320,12 @@ ConnectionManagerUtility::MutateRequestHeadersResult ConnectionManagerUtility::m
     value.setCopy("1");
     request_headers.addViaMove(HeaderString(Headers::get().EarlyData), std::move(value));
   }
-  mutateXfccRequestHeader(request_headers, connection, config);
+  mutateXfccRequestHeader(request_headers, stream_info, connection, config);
 
   return {final_remote_address, absl::nullopt};
 }
 
 void ConnectionManagerUtility::sanitizeTEHeader(RequestHeaderMap& request_headers) {
-  if (!Runtime::runtimeFeatureEnabled("envoy.reloadable_features.sanitize_te")) {
-    return;
-  }
-
   absl::string_view te_header = request_headers.getTEValue();
   if (te_header.empty()) {
     return;
@@ -317,14 +349,18 @@ void ConnectionManagerUtility::sanitizeTEHeader(RequestHeaderMap& request_header
 
 void ConnectionManagerUtility::cleanInternalHeaders(
     RequestHeaderMap& request_headers, bool edge_request,
-    const std::list<Http::LowerCaseString>& internal_only_headers) {
+    const std::vector<Http::LowerCaseString>& internal_only_headers) {
   if (edge_request) {
     // Headers to be stripped from edge requests, i.e. to sanitize so
     // clients can't inject values.
     request_headers.removeEnvoyDecoratorOperation();
     request_headers.removeEnvoyDownstreamServiceCluster();
     request_headers.removeEnvoyDownstreamServiceNode();
+
+    // TODO(wbpcode): Envoy may should always remove these headers from client because
+    // these headers are hop by hop headers and should not be sent to upstream.
     request_headers.removeEnvoyOriginalPath();
+    request_headers.removeEnvoyOriginalHost();
   }
 
   // Headers to be stripped from edge *and* intermediate-hop external requests.
@@ -376,10 +412,11 @@ Tracing::Reason ConnectionManagerUtility::mutateTracingRequestHeader(
   const envoy::type::v3::FractionalPercent* overall_sampling =
       &config.tracingConfig()->overall_sampling_;
 
-  if (route && route->tracingConfig()) {
-    client_sampling = &route->tracingConfig()->getClientSampling();
-    random_sampling = &route->tracingConfig()->getRandomSampling();
-    overall_sampling = &route->tracingConfig()->getOverallSampling();
+  const Router::RouteTracing* route_tracing = route ? route->tracingConfig() : nullptr;
+  if (route_tracing != nullptr) {
+    client_sampling = &route_tracing->getClientSampling();
+    random_sampling = &route_tracing->getRandomSampling();
+    overall_sampling = &route_tracing->getOverallSampling();
   }
 
   // Do not apply tracing transformations if we are currently tracing.
@@ -408,22 +445,28 @@ Tracing::Reason ConnectionManagerUtility::mutateTracingRequestHeader(
   return final_reason;
 }
 
-void ConnectionManagerUtility::mutateXfccRequestHeader(RequestHeaderMap& request_headers,
-                                                       Network::Connection& connection,
-                                                       ConnectionManagerConfig& config) {
+namespace {
+
+// Helper functions to apply forward client cert logic.
+
+// Base implementation that takes the forward client cert type and details directly.
+void applyForwardClientCertConfig(
+    RequestHeaderMap& request_headers, Network::Connection& connection,
+    ForwardClientCertType forward_client_cert,
+    const std::vector<ClientCertDetailsType>& set_current_client_cert_details) {
   // When AlwaysForwardOnly is set, always forward the XFCC header without modification.
-  if (config.forwardClientCert() == ForwardClientCertType::AlwaysForwardOnly) {
+  if (forward_client_cert == ForwardClientCertType::AlwaysForwardOnly) {
     return;
   }
   // When Sanitize is set, or the connection is not mutual TLS, remove the XFCC header.
-  if (config.forwardClientCert() == ForwardClientCertType::Sanitize ||
+  if (forward_client_cert == ForwardClientCertType::Sanitize ||
       !(connection.ssl() && connection.ssl()->peerCertificatePresented())) {
     request_headers.removeForwardedClientCert();
     return;
   }
 
   // When ForwardOnly is set, always forward the XFCC header without modification.
-  if (config.forwardClientCert() == ForwardClientCertType::ForwardOnly) {
+  if (forward_client_cert == ForwardClientCertType::ForwardOnly) {
     return;
   }
 
@@ -433,8 +476,8 @@ void ConnectionManagerUtility::mutateXfccRequestHeader(RequestHeaderMap& request
   std::vector<std::string> client_cert_details;
   // When AppendForward or SanitizeSet is set, the client certificate information should be set into
   // the XFCC header.
-  if (config.forwardClientCert() == ForwardClientCertType::AppendForward ||
-      config.forwardClientCert() == ForwardClientCertType::SanitizeSet) {
+  if (forward_client_cert == ForwardClientCertType::AppendForward ||
+      forward_client_cert == ForwardClientCertType::SanitizeSet) {
     const auto uri_sans_local_cert = connection.ssl()->uriSanLocalCertificate();
     if (!uri_sans_local_cert.empty()) {
       for (const std::string& uri : uri_sans_local_cert) {
@@ -445,7 +488,7 @@ void ConnectionManagerUtility::mutateXfccRequestHeader(RequestHeaderMap& request
     if (!cert_digest.empty()) {
       client_cert_details.push_back(absl::StrCat("Hash=", cert_digest));
     }
-    for (const auto& detail : config.setCurrentClientCertDetails()) {
+    for (const auto& detail : set_current_client_cert_details) {
       switch (detail) {
       case ClientCertDetailsType::Cert: {
         const std::string peer_cert = connection.ssl()->urlEncodedPemEncodedPeerCertificate();
@@ -493,14 +536,41 @@ void ConnectionManagerUtility::mutateXfccRequestHeader(RequestHeaderMap& request
 
   const std::string client_cert_details_str = absl::StrJoin(client_cert_details, ";");
 
-  ENVOY_BUG(config.forwardClientCert() == ForwardClientCertType::AppendForward ||
-                config.forwardClientCert() == ForwardClientCertType::SanitizeSet,
+  ENVOY_BUG(forward_client_cert == ForwardClientCertType::AppendForward ||
+                forward_client_cert == ForwardClientCertType::SanitizeSet,
             "error in client cert logic");
-  if (config.forwardClientCert() == ForwardClientCertType::AppendForward) {
+  if (forward_client_cert == ForwardClientCertType::AppendForward) {
     request_headers.appendForwardedClientCert(client_cert_details_str, ",");
-  } else if (config.forwardClientCert() == ForwardClientCertType::SanitizeSet) {
+  } else if (forward_client_cert == ForwardClientCertType::SanitizeSet) {
     request_headers.setForwardedClientCert(client_cert_details_str);
   }
+}
+
+} // namespace
+
+void ConnectionManagerUtility::mutateXfccRequestHeader(RequestHeaderMap& request_headers,
+                                                       const StreamInfo::StreamInfo& stream_info,
+                                                       Network::Connection& connection,
+                                                       ConnectionManagerConfig& config) {
+  // If a matcher is configured, evaluate it to get per-request forward client cert config.
+  if (const auto& matcher = config.forwardClientCertMatcher(); matcher != nullptr) {
+    Matching::HttpMatchingDataImpl data(stream_info);
+    data.onRequestHeaders(request_headers);
+    auto match_result = Matcher::evaluateMatch<HttpMatchingData>(*matcher, data);
+    if (match_result.isMatch() && match_result.action() != nullptr) {
+      // Use the matched action's config via the ForwardClientCertActionConfig interface.
+      const auto& forward_client_cert_action =
+          match_result.action()->getTyped<ForwardClientCertActionConfig>();
+      applyForwardClientCertConfig(request_headers, connection,
+                                   forward_client_cert_action.forwardClientCertType(),
+                                   forward_client_cert_action.setCurrentClientCertDetails());
+      return;
+    }
+  }
+
+  // Fall back to static config if no matcher or no match.
+  applyForwardClientCertConfig(request_headers, connection, config.forwardClientCert(),
+                               config.setCurrentClientCertDetails());
 }
 
 void ConnectionManagerUtility::mutateResponseHeaders(ResponseHeaderMap& response_headers,

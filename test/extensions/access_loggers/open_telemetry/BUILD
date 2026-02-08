@@ -14,9 +14,27 @@ licenses(["notice"])  # Apache 2
 envoy_package()
 
 envoy_extension_cc_test(
+    name = "otlp_log_utils_test",
+    srcs = ["otlp_log_utils_test.cc"],
+    extension_names = ["envoy.access_loggers.open_telemetry"],
+    deps = [
+        "//source/common/http:header_map_lib",
+        "//source/common/router:string_accessor_lib",
+        "//source/common/stream_info:filter_state_lib",
+        "//source/extensions/access_loggers/open_telemetry:otlp_log_utils_lib",
+        "//test/mocks/local_info:local_info_mocks",
+        "//test/mocks/stream_info:stream_info_mocks",
+        "//test/test_common:utility_lib",
+        "@opentelemetry-proto//:logs_proto_cc",
+        "@opentelemetry-proto//:logs_service_proto_cc",
+    ],
+)
+
+envoy_extension_cc_test(
     name = "grpc_access_log_impl_test",
     srcs = ["grpc_access_log_impl_test.cc"],
     extension_names = ["envoy.access_loggers.open_telemetry"],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/buffer:zero_copy_input_stream_lib",
         "//source/common/protobuf",
@@ -27,7 +45,24 @@ envoy_extension_cc_test(
         "//test/mocks/thread_local:thread_local_mocks",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/access_loggers/grpc/v3:pkg_cc_proto",
-        "@opentelemetry_proto//:logs_cc_proto",
+        "@opentelemetry-proto//:logs_proto_cc",
+        "@opentelemetry-proto//:logs_service_proto_cc",
+    ],
+)
+
+envoy_extension_cc_test(
+    name = "http_access_log_impl_test",
+    srcs = ["http_access_log_impl_test.cc"],
+    extension_names = ["envoy.access_loggers.open_telemetry"],
+    rbe_pool = "6gig",
+    deps = [
+        "//source/extensions/access_loggers/open_telemetry:http_access_log_lib",
+        "//test/mocks/event:event_mocks",
+        "//test/mocks/local_info:local_info_mocks",
+        "//test/mocks/stats:stats_mocks",
+        "//test/mocks/thread_local:thread_local_mocks",
+        "//test/mocks/upstream:cluster_manager_mocks",
+        "//test/test_common:utility_lib",
     ],
 )
 
@@ -35,6 +70,7 @@ envoy_extension_cc_test(
     name = "access_log_impl_test",
     srcs = ["access_log_impl_test.cc"],
     extension_names = ["envoy.access_loggers.open_telemetry"],
+    rbe_pool = "6gig",
     deps = [
         "//envoy/common:time_interface",
         "//source/common/formatter:formatter_extension_lib",
@@ -51,7 +87,8 @@ envoy_extension_cc_test(
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/data/accesslog/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/access_loggers/grpc/v3:pkg_cc_proto",
-        "@opentelemetry_proto//:logs_cc_proto",
+        "@opentelemetry-proto//:logs_proto_cc",
+        "@opentelemetry-proto//:logs_service_proto_cc",
     ],
 )
 
@@ -59,6 +96,7 @@ envoy_extension_cc_test(
     name = "config_test",
     srcs = ["config_test.cc"],
     extension_names = ["envoy.access_loggers.open_telemetry"],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/formatter:formatter_extension_lib",
         "//source/extensions/access_loggers/open_telemetry:access_log_lib",
@@ -74,6 +112,7 @@ envoy_extension_cc_test(
     size = "large",
     srcs = ["access_log_integration_test.cc"],
     extension_names = ["envoy.access_loggers.open_telemetry"],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/buffer:zero_copy_input_stream_lib",
         "//source/common/formatter:formatter_extension_lib",
@@ -87,7 +126,8 @@ envoy_extension_cc_test(
         "@envoy_api//envoy/extensions/access_loggers/grpc/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/access_loggers/open_telemetry/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
-        "@opentelemetry_proto//:logs_cc_proto",
+        "@opentelemetry-proto//:logs_proto_cc",
+        "@opentelemetry-proto//:logs_service_proto_cc",
     ],
 )
 
@@ -101,6 +141,7 @@ envoy_extension_cc_test(
         ],
     }),
     extension_names = ["envoy.access_loggers.open_telemetry"],
+    rbe_pool = "6gig",
     tags = ["skip_on_windows"],
     deps = [
         "//source/common/formatter:formatter_extension_lib",
@@ -116,12 +157,12 @@ envoy_extension_cc_test(
         "//test/mocks/stream_info:stream_info_mocks",
         "//test/mocks/upstream:cluster_info_mocks",
         "//test/test_common:utility_lib",
-        "@opentelemetry_proto//:logs_cc_proto",
+        "@opentelemetry-proto//:logs_proto_cc",
     ] + select(
         {
             "//bazel:windows_x86_64": [],
             "//conditions:default": [
-                "@com_google_cel_cpp//parser",
+                "@cel-cpp//parser",
             ],
         },
     ),
@@ -130,9 +171,7 @@ envoy_extension_cc_test(
 envoy_cc_benchmark_binary(
     name = "substitution_formatter_speed_test",
     srcs = ["substitution_formatter_speed_test.cc"],
-    external_deps = [
-        "benchmark",
-    ],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/formatter:formatter_extension_lib",
         "//source/common/http:header_map_lib",
@@ -140,7 +179,8 @@ envoy_cc_benchmark_binary(
         "//source/extensions/access_loggers/open_telemetry:substitution_formatter_lib",
         "//test/common/stream_info:test_util",
         "//test/mocks/stream_info:stream_info_mocks",
-        "@opentelemetry_proto//:common_cc_proto",
+        "@benchmark",
+        "@opentelemetry-proto//:common_proto_cc",
     ],
 )
 

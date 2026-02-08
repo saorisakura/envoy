@@ -1,3 +1,5 @@
+#include "source/common/filesystem/watcher_impl.h"
+
 #include <sys/inotify.h>
 
 #include <cstdint>
@@ -10,8 +12,8 @@
 
 #include "source/common/common/assert.h"
 #include "source/common/common/fmt.h"
+#include "source/common/common/thread.h"
 #include "source/common/common/utility.h"
-#include "source/common/filesystem/watcher_impl.h"
 
 namespace Envoy {
 namespace Filesystem {
@@ -19,8 +21,8 @@ namespace Filesystem {
 WatcherImpl::WatcherImpl(Event::Dispatcher& dispatcher, Filesystem::Instance& file_system)
     : file_system_(file_system) {
   inotify_fd_ = inotify_init1(IN_NONBLOCK);
-  RELEASE_ASSERT(inotify_fd_ >= 0,
-                 "Consider increasing value of user.max_inotify_watches via sysctl");
+  RELEASE_ASSERT(inotify_fd_ >= 0, "Consider increasing value of fs.inotify.max_user_watches "
+                                   "and/or fs.inotify.max_user_instances via sysctl");
   inotify_event_ = dispatcher.createFileEvent(
       inotify_fd_,
       [this](uint32_t events) {
@@ -50,6 +52,28 @@ absl::Status WatcherImpl::addWatch(absl::string_view path, uint32_t events, OnCh
             result.file_, watch_fd);
   callback_map_[watch_fd].watches_.push_back({std::string(result.file_), events, callback});
   return absl::OkStatus();
+}
+
+void WatcherImpl::callAndLogOnError(OnChangedCb& cb, uint32_t events, const std::string& file) {
+  TRY_ASSERT_MAIN_THREAD {
+    const absl::Status status = cb(events);
+    if (!status.ok()) {
+      // Use ENVOY_LOG_EVERY_POW_2 to avoid log spam if a callback keeps failing.
+      ENVOY_LOG_EVERY_POW_2(warn, "Filesystem watch callback for '{}' returned error: {}", file,
+                            status.message());
+    }
+  }
+  END_TRY
+  MULTI_CATCH(
+      const std::exception& e,
+      {
+        ENVOY_LOG_EVERY_POW_2(warn, "Filesystem watch callback for '{}' threw exception: {}", file,
+                              e.what());
+      },
+      {
+        ENVOY_LOG_EVERY_POW_2(warn, "Filesystem watch callback for '{}' threw unknown exception",
+                              file);
+      });
 }
 
 absl::Status WatcherImpl::onInotifyEvent() {
@@ -90,10 +114,10 @@ absl::Status WatcherImpl::onInotifyEvent() {
         if (watch.events_ & events) {
           if (watch.file_ == file) {
             ENVOY_LOG(debug, "matched callback: file: {}", file);
-            RETURN_IF_NOT_OK(watch.cb_(events));
+            callAndLogOnError(watch.cb_, events, file);
           } else if (watch.file_.empty()) {
             ENVOY_LOG(debug, "matched callback: directory: {}", file);
-            RETURN_IF_NOT_OK(watch.cb_(events));
+            callAndLogOnError(watch.cb_, events, file);
           }
         }
       }

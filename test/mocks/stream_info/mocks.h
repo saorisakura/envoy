@@ -66,6 +66,8 @@ public:
   MOCK_METHOD(const Network::Address::InstanceConstSharedPtr&, upstreamRemoteAddress, (), (const));
   MOCK_METHOD(void, setUpstreamTransportFailureReason, (absl::string_view failure_reason));
   MOCK_METHOD(const std::string&, upstreamTransportFailureReason, (), (const));
+  MOCK_METHOD(void, setUpstreamDetectedCloseType, (DetectedCloseType close_type));
+  MOCK_METHOD(DetectedCloseType, upstreamDetectedCloseType, (), (const));
   MOCK_METHOD(void, setUpstreamHost, (Upstream::HostDescriptionConstSharedPtr host));
   MOCK_METHOD(Upstream::HostDescriptionConstSharedPtr, upstreamHost, (), (const));
   MOCK_METHOD(const FilterStateSharedPtr&, upstreamFilterState, (), (const));
@@ -82,6 +84,7 @@ public:
   Network::Address::InstanceConstSharedPtr upstream_local_address_;
   Network::Address::InstanceConstSharedPtr upstream_remote_address_;
   std::string failure_reason_;
+  DetectedCloseType upstream_detected_close_type_ = DetectedCloseType::Normal;
   Upstream::HostDescriptionConstSharedPtr upstream_host_;
   FilterStateSharedPtr filter_state_;
   uint64_t num_streams_ = 0;
@@ -139,12 +142,13 @@ public:
   MOCK_METHOD(void, healthCheck, (bool is_health_check));
   MOCK_METHOD(const Network::ConnectionInfoProvider&, downstreamAddressProvider, (), (const));
   MOCK_METHOD(Router::RouteConstSharedPtr, route, (), (const));
+  MOCK_METHOD(const Router::VirtualHostConstSharedPtr&, virtualHost, (), (const));
   MOCK_METHOD(envoy::config::core::v3::Metadata&, dynamicMetadata, ());
   MOCK_METHOD(const envoy::config::core::v3::Metadata&, dynamicMetadata, (), (const));
-  MOCK_METHOD(void, setDynamicMetadata, (const std::string&, const ProtobufWkt::Struct&));
+  MOCK_METHOD(void, setDynamicMetadata, (const std::string&, const Protobuf::Struct&));
   MOCK_METHOD(void, setDynamicMetadata,
               (const std::string&, const std::string&, const std::string&));
-  MOCK_METHOD(void, setDynamicTypedMetadata, (const std::string&, const ProtobufWkt::Any& value));
+  MOCK_METHOD(void, setDynamicTypedMetadata, (const std::string&, const Protobuf::Any& value));
   MOCK_METHOD(const FilterStateSharedPtr&, filterState, ());
   MOCK_METHOD(const FilterState&, filterState, (), (const));
   MOCK_METHOD(void, setRequestHeaders, (const Http::RequestHeaderMap&));
@@ -168,6 +172,10 @@ public:
   MOCK_METHOD(bool, isShadow, (), (const, override));
   MOCK_METHOD(void, setDownstreamTransportFailureReason, (absl::string_view failure_reason));
   MOCK_METHOD(absl::string_view, downstreamTransportFailureReason, (), (const));
+  MOCK_METHOD(void, setDownstreamLocalCloseReason, (absl::string_view failure_reason));
+  MOCK_METHOD(absl::string_view, downstreamLocalCloseReason, (), (const));
+  MOCK_METHOD(void, setDownstreamDetectedCloseType, (DetectedCloseType close_type));
+  MOCK_METHOD(DetectedCloseType, downstreamDetectedCloseType, (), (const));
   MOCK_METHOD(bool, shouldSchemeMatchUpstream, (), (const));
   MOCK_METHOD(void, setShouldSchemeMatchUpstream, (bool));
   MOCK_METHOD(bool, shouldDrainConnectionUponCompletion, (), (const));
@@ -175,6 +183,10 @@ public:
   MOCK_METHOD(void, setParentStreamInfo, (const StreamInfo&), ());
   MOCK_METHOD(void, clearParentStreamInfo, ());
   MOCK_METHOD(OptRef<const StreamInfo>, parentStreamInfo, (), (const));
+  MOCK_METHOD(void, addCustomFlag, (absl::string_view));
+  MOCK_METHOD(absl::string_view, customFlags, (), (const));
+  MOCK_METHOD(absl::optional<uint32_t>, codecStreamId, (), (const, override));
+  MOCK_METHOD(void, setCodecStreamId, (absl::optional<uint32_t> id), (override));
 
   Envoy::Event::SimulatedTimeSystem ts_;
   SystemTime start_time_;
@@ -186,7 +198,7 @@ public:
   absl::optional<std::string> connection_termination_details_;
   absl::optional<Upstream::ClusterInfoConstSharedPtr> upstream_cluster_info_;
   std::shared_ptr<UpstreamInfo> upstream_info_;
-  absl::InlinedVector<ResponseFlag, 4> response_flags_{};
+  absl::InlinedVector<ResponseFlag, 4> response_flags_;
   envoy::config::core::v3::Metadata metadata_;
   FilterStateSharedPtr filter_state_;
   uint64_t bytes_received_{};
@@ -200,6 +212,10 @@ public:
   absl::optional<std::string> virtual_cluster_name_;
   DownstreamTiming downstream_timing_;
   std::string downstream_transport_failure_reason_;
+  std::string downstream_local_close_reason_;
+  DetectedCloseType downstream_detected_close_type_{DetectedCloseType::Normal};
+  std::string stream_flags_;
+  Router::VirtualHostConstSharedPtr virtual_host_;
 };
 
 } // namespace StreamInfo

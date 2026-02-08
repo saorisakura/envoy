@@ -108,7 +108,7 @@ public:
     if (downstream_protocol_ == Http::CodecType::HTTP1) {
       ASSERT_TRUE(codec_client_->waitForDisconnect());
     } else {
-      ASSERT_TRUE(response.waitForReset());
+      ASSERT_TRUE(response.waitForAnyTermination());
       codec_client_->close();
     }
     if (!stat_name.empty()) {
@@ -259,6 +259,19 @@ TEST_P(IdleTimeoutIntegrationTest, PerStreamIdleTimeoutAfterDownstreamHeaders) {
   EXPECT_THAT(waitForAccessLog(access_log_name_), HasSubstr("stream_idle_timeout"));
 }
 
+TEST_P(IdleTimeoutIntegrationTest, PerStreamIdleTimeoutDuringHostSelection) {
+  enable_per_stream_idle_timeout_ = true;
+  config_helper_.setAsyncLb(true); // Set the lb to hang during host selection.
+
+  initialize();
+
+  codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
+  auto response = codec_client_->makeHeaderOnlyRequest(default_request_headers_);
+
+  ASSERT_TRUE(response->waitForEndStream());
+  EXPECT_THAT(waitForAccessLog(access_log_name_), HasSubstr("stream_idle_timeout"));
+}
+
 // Per-stream idle timeout after having sent downstream headers.
 TEST_P(IdleTimeoutIntegrationTest, IdleStreamTimeoutWithRouteReselect) {
   enable_per_stream_idle_timeout_ = true;
@@ -378,7 +391,7 @@ TEST_P(IdleTimeoutIntegrationTest, ResponseTimeout) {
   initialize();
 
   // Lock up fake upstream so that it won't accept connections.
-  absl::MutexLock l(&fake_upstreams_[0]->lock());
+  absl::MutexLock l(fake_upstreams_[0]->lock());
 
   codec_client_ = makeHttpConnection(makeClientConnection((lookupPort("http"))));
   auto response = codec_client_->makeHeaderOnlyRequest(default_request_headers_);

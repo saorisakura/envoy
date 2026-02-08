@@ -10,9 +10,13 @@ namespace Extensions {
 namespace HttpFilters {
 namespace Cache {
 
-using OverHighWatermarkCallback = std::function<void()>;
-using UnderLowWatermarkCallback = std::function<void()>;
-using AbortInsertCallback = std::function<void()>;
+class InsertQueueCallbacks {
+public:
+  virtual void insertQueueOverHighWatermark() PURE;
+  virtual void insertQueueUnderLowWatermark() PURE;
+  virtual void insertQueueAborted() PURE;
+  virtual ~InsertQueueCallbacks() = default;
+};
 class CacheInsertFragment;
 
 // This queue acts as an intermediary between CacheFilter and the cache
@@ -21,11 +25,11 @@ class CacheInsertFragment;
 // potentially at a slower rate, without having to implement its own buffer.
 //
 // If the queue contains more than the "high watermark" for the buffer
-// (encoder_callbacks.encoderBufferLimit()), then a high watermark event is
+// (encoder_callbacks.bufferLimit()), then a high watermark event is
 // sent to the encoder, which may cause the filter to slow down, to allow the
 // cache implementation time to catch up and avoid buffering significantly
 // more data in memory than the configuration intends to allow. When this happens,
-// the queue must drain to half the encoderBufferLimit before a low watermark
+// the queue must drain to half the bufferLimit before a low watermark
 // event is sent to resume normal flow.
 //
 // From the cache implementation's perspective, the queue ensures that the cache
@@ -36,7 +40,7 @@ class CacheInsertQueue {
 public:
   CacheInsertQueue(std::shared_ptr<HttpCache> cache,
                    Http::StreamEncoderFilterCallbacks& encoder_callbacks,
-                   InsertContextPtr insert_context, AbortInsertCallback abort);
+                   InsertContextPtr insert_context, InsertQueueCallbacks& callbacks);
   void insertHeaders(const Http::ResponseHeaderMap& response_headers,
                      const ResponseMetadata& metadata, bool end_stream);
   void insertBody(const Buffer::Instance& fragment, bool end_stream);
@@ -50,8 +54,7 @@ private:
   Event::Dispatcher& dispatcher_;
   const InsertContextPtr insert_context_;
   const size_t low_watermark_bytes_, high_watermark_bytes_;
-  OptRef<Http::StreamEncoderFilterCallbacks> encoder_callbacks_;
-  AbortInsertCallback abort_callback_;
+  OptRef<InsertQueueCallbacks> callbacks_;
   std::deque<std::unique_ptr<CacheInsertFragment>> fragments_;
   // Size of the data currently in the queue (including any fragment in flight).
   size_t queue_size_bytes_ = 0;

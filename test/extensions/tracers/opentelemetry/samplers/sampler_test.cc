@@ -27,9 +27,9 @@ using ::testing::StrictMock;
 class TestSampler : public Sampler {
 public:
   MOCK_METHOD(SamplingResult, shouldSample,
-              ((const absl::optional<SpanContext>), (const std::string&), (const std::string&),
-               (OTelSpanKind), (OptRef<const Tracing::TraceContext>),
-               (const std::vector<SpanContext>&)),
+              ((const StreamInfo::StreamInfo&), (const absl::optional<SpanContext>),
+               (const std::string&), (const std::string&), (OTelSpanKind),
+               (OptRef<const Tracing::TraceContext>), (const std::vector<SpanContext>&)),
               (override));
   MOCK_METHOD(std::string, getDescription, (), (const, override));
 };
@@ -41,7 +41,7 @@ public:
                Server::Configuration::TracerFactoryContext& context));
 
   ProtobufTypes::MessagePtr createEmptyConfigProto() override {
-    return std::make_unique<ProtobufWkt::Struct>();
+    return std::make_unique<Protobuf::Struct>();
   }
 
   std::string name() const override { return "envoy.tracers.opentelemetry.samplers.testsampler"; }
@@ -139,10 +139,10 @@ TEST_F(SamplerFactoryTest, TestWithSampler) {
   auto driver = std::make_unique<Driver>(opentelemetry_config, context);
 
   // shouldSample returns a result without additional attributes and Decision::RecordAndSample
-  EXPECT_CALL(*test_sampler, shouldSample(_, _, _, _, _, _))
-      .WillOnce([](const absl::optional<SpanContext>, const std::string&, const std::string&,
-                   OTelSpanKind, OptRef<const Tracing::TraceContext>,
-                   const std::vector<SpanContext>&) {
+  EXPECT_CALL(*test_sampler, shouldSample(_, _, _, _, _, _, _))
+      .WillOnce([](const StreamInfo::StreamInfo&, const absl::optional<SpanContext>,
+                   const std::string&, const std::string&, OTelSpanKind,
+                   OptRef<const Tracing::TraceContext>, const std::vector<SpanContext>&) {
         SamplingResult res;
         res.decision = Decision::RecordAndSample;
         res.tracestate = "this_is=tracesate";
@@ -156,25 +156,25 @@ TEST_F(SamplerFactoryTest, TestWithSampler) {
   // So the dynamic_cast should be safe.
   std::unique_ptr<Span> span(dynamic_cast<Span*>(tracing_span.release()));
   EXPECT_TRUE(span->sampled());
-  EXPECT_STREQ(span->tracestate().c_str(), "this_is=tracesate");
+  EXPECT_EQ(span->tracestate(), "this_is=tracesate");
 
   // shouldSamples return a result containing additional attributes and Decision::Drop
-  EXPECT_CALL(*test_sampler, shouldSample(_, _, _, _, _, _))
-      .WillOnce([](const absl::optional<SpanContext>, const std::string&, const std::string&,
-                   OTelSpanKind, OptRef<const Tracing::TraceContext>,
-                   const std::vector<SpanContext>&) {
+  EXPECT_CALL(*test_sampler, shouldSample(_, _, _, _, _, _, _))
+      .WillOnce([](const StreamInfo::StreamInfo&, const absl::optional<SpanContext>,
+                   const std::string&, const std::string&, OTelSpanKind,
+                   OptRef<const Tracing::TraceContext>, const std::vector<SpanContext>&) {
         SamplingResult res;
         res.decision = Decision::Drop;
         OtelAttributes attributes;
-        attributes["char_key"] = "char_value";
-        attributes["sv_key"] = absl::string_view("sv_value");
         attributes["bool_key"] = true;
         attributes["int_key"] = static_cast<int32_t>(123);
         attributes["uint_key"] = static_cast<uint32_t>(123);
         attributes["int64_t_key"] = static_cast<int64_t>(INT64_MAX);
         attributes["uint64_t_key"] = static_cast<uint64_t>(UINT64_MAX);
         attributes["double_key"] = 0.123;
-        attributes["not_supported_span"] = opentelemetry::nostd::span<bool>();
+        attributes["string_key"] = std::string("string_value");
+        attributes["sv_key"] = absl::string_view("sv_value");
+        attributes["string_array"] = std::vector<std::string>{"value_1", "value_2"};
 
         res.attributes = std::make_unique<const OtelAttributes>(std::move(attributes));
         res.tracestate = "this_is=another_tracesate";
@@ -184,7 +184,7 @@ TEST_F(SamplerFactoryTest, TestWithSampler) {
                                    {Tracing::Reason::Sampling, true});
   std::unique_ptr<Span> unsampled_span(dynamic_cast<Span*>(tracing_span.release()));
   EXPECT_FALSE(unsampled_span->sampled());
-  EXPECT_STREQ(unsampled_span->tracestate().c_str(), "this_is=another_tracesate");
+  EXPECT_EQ(unsampled_span->tracestate(), "this_is=another_tracesate");
   auto proto_span = unsampled_span->spanForTest();
 
   auto get_attr_value =
@@ -196,9 +196,6 @@ TEST_F(SamplerFactoryTest, TestWithSampler) {
     }
     return nullptr;
   };
-
-  ASSERT_NE(get_attr_value("char_key"), nullptr);
-  EXPECT_STREQ(get_attr_value("char_key")->string_value().c_str(), "char_value");
 
   ASSERT_NE(get_attr_value("sv_key"), nullptr);
   EXPECT_STREQ(get_attr_value("sv_key")->string_value().c_str(), "sv_value");
@@ -220,6 +217,11 @@ TEST_F(SamplerFactoryTest, TestWithSampler) {
 
   ASSERT_NE(get_attr_value("double_key"), nullptr);
   EXPECT_EQ(get_attr_value("double_key")->double_value(), 0.123);
+
+  auto string_array = get_attr_value("string_array");
+  ASSERT_NE(string_array, nullptr);
+  EXPECT_EQ(string_array->mutable_array_value()->mutable_values(0)->string_value(), "value_1");
+  EXPECT_EQ(string_array->mutable_array_value()->mutable_values(1)->string_value(), "value_2");
 }
 
 // Test that sampler receives trace_context
@@ -248,7 +250,7 @@ TEST_F(SamplerFactoryTest, TestInitialAttributes) {
   auto driver = std::make_unique<Driver>(opentelemetry_config, context);
 
   auto expected = makeOptRef<const Tracing::TraceContext>(trace_context);
-  EXPECT_CALL(*test_sampler, shouldSample(_, _, _, _, expected, _));
+  EXPECT_CALL(*test_sampler, shouldSample(_, _, _, _, _, expected, _));
   driver->startSpan(config, trace_context, stream_info, "operation_name",
                     {Tracing::Reason::Sampling, true});
 }

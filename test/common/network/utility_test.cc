@@ -1,9 +1,11 @@
+#include <fcntl.h>
+
 #ifndef WIN32
 #include <net/if.h>
 
 #else
-#include <winsock2.h>
 #include <iphlpapi.h>
+#include <winsock2.h>
 #endif
 
 #include <cstdint>
@@ -30,6 +32,7 @@
 
 using testing::DoAll;
 using testing::Eq;
+using testing::Invoke;
 using testing::Return;
 using testing::ReturnRef;
 
@@ -555,6 +558,15 @@ TEST(NetworkUtility, ParseProtobufAddress) {
   }
   {
     envoy::config::core::v3::Address proto_address;
+    proto_address.mutable_socket_address()->set_address("::1");
+    proto_address.mutable_socket_address()->set_port_value(1234);
+    proto_address.mutable_socket_address()->set_network_namespace_filepath("/proc/test-ns/ns/net");
+    EXPECT_EQ("[::1]:1234", Utility::protobufAddressToAddressNoThrow(proto_address)->asString());
+    EXPECT_EQ("/proc/test-ns/ns/net",
+              Utility::protobufAddressToAddressNoThrow(proto_address)->networkNamespace().value());
+  }
+  {
+    envoy::config::core::v3::Address proto_address;
     proto_address.mutable_pipe()->set_path("/tmp/unix-socket");
     EXPECT_EQ("/tmp/unix-socket",
               Utility::protobufAddressToAddressNoThrow(proto_address)->asString());
@@ -599,6 +611,15 @@ TEST(NetworkUtility, AddressToProtobufAddress) {
     EXPECT_TRUE(proto_address.has_envoy_internal_address());
     EXPECT_EQ("internal_address", proto_address.envoy_internal_address().server_listener_name());
     EXPECT_EQ("endpoint_id", proto_address.envoy_internal_address().endpoint_id());
+  }
+  {
+    envoy::config::core::v3::Address proto_address;
+    Address::Ipv6Instance address("::1", 1234, nullptr, true, "/proc/1234/ns/net");
+    Utility::addressToProtobufAddress(address, proto_address);
+    EXPECT_TRUE(proto_address.has_socket_address());
+    EXPECT_EQ("::1", proto_address.socket_address().address());
+    EXPECT_EQ(1234, proto_address.socket_address().port_value());
+    EXPECT_EQ("/proc/1234/ns/net", proto_address.socket_address().network_namespace_filepath());
   }
 }
 
@@ -687,6 +708,15 @@ TEST(ResolvedUdpSocketConfig, Warning) {
 
 #ifndef WIN32
 TEST(PacketLoss, LossTest) {
+  class ZeroTimeSource : public TimeSource {
+  public:
+    ZeroTimeSource() = default;
+    ~ZeroTimeSource() override = default;
+
+    SystemTime systemTime() override { return SystemTime(std::chrono::seconds(0)); }
+    MonotonicTime monotonicTime() override { return MonotonicTime(std::chrono::seconds(0)); }
+  };
+
   // Create and bind a UDP socket.
   auto version = TestEnvironment::getIpVersionsForTest()[0];
   auto kernel_version = version == Network::Address::IpVersion::v4 ? AF_INET : AF_INET6;
@@ -722,16 +752,16 @@ TEST(PacketLoss, LossTest) {
   NiceMock<MockUdpPacketProcessor> processor;
   IoHandle::UdpSaveCmsgConfig udp_save_cmsg_config;
   ON_CALL(processor, saveCmsgConfig()).WillByDefault(ReturnRef(udp_save_cmsg_config));
-  MonotonicTime time(std::chrono::seconds(0));
   uint32_t packets_dropped = 0;
   UdpRecvMsgMethod recv_msg_method = UdpRecvMsgMethod::RecvMsg;
   if (Api::OsSysCallsSingleton::get().supportsMmsg()) {
     recv_msg_method = UdpRecvMsgMethod::RecvMmsg;
   }
 
+  ZeroTimeSource time_source;
   uint32_t packets_read = 0;
-  Utility::readFromSocket(handle, *address, processor, time, recv_msg_method, &packets_dropped,
-                          &packets_read);
+  Utility::readFromSocket(handle, *address, processor, time_source, recv_msg_method,
+                          &packets_dropped, &packets_read);
   EXPECT_EQ(1, packets_dropped);
   EXPECT_EQ(0, packets_read);
 
@@ -740,10 +770,124 @@ TEST(PacketLoss, LossTest) {
                                         reinterpret_cast<sockaddr*>(&storage), sizeof(storage)));
 
   // Make sure the drop count is now 2.
-  Utility::readFromSocket(handle, *address, processor, time, recv_msg_method, &packets_dropped,
-                          &packets_read);
+  Utility::readFromSocket(handle, *address, processor, time_source, recv_msg_method,
+                          &packets_dropped, &packets_read);
   EXPECT_EQ(2, packets_dropped);
   EXPECT_EQ(0, packets_read);
+}
+#endif
+
+#if defined(__linux__)
+class ExecInNetnsTest : public testing::Test {
+public:
+  void SetUp() override {}
+
+protected:
+  std::string getCurrentNetns() const { return current_netns_; }
+
+  int next_fd_{1};
+  absl::flat_hash_map<int, const char*> fake_fd_map_;
+  std::string current_netns_;
+};
+
+TEST_F(ExecInNetnsTest, Basic) {
+  // Make the tests use mock syscalls.
+  testing::StrictMock<Api::MockLinuxOsSysCalls> linux_os_syscalls;
+  testing::StrictMock<Api::MockOsSysCalls> os_syscalls;
+  TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_syscalls);
+  TestThreadsafeSingletonInjector<Api::LinuxOsSysCallsImpl> linux_os_calls(&linux_os_syscalls);
+
+  EXPECT_CALL(os_syscalls, close(_)).WillRepeatedly(Invoke([this](int fd) -> Api::SysCallIntResult {
+    EXPECT_TRUE(fake_fd_map_.contains(fd));
+    fake_fd_map_.erase(fd);
+    return {0, 0};
+  }));
+
+  EXPECT_CALL(linux_os_syscalls, setns(_, Eq(CLONE_NEWNET)))
+      .WillRepeatedly(([this](int fd, int) -> Api::SysCallIntResult {
+        EXPECT_TRUE(fake_fd_map_.contains(fd));
+        current_netns_ = fake_fd_map_[fd];
+        return {0, 0};
+      }));
+
+  // Every time open() is called, we want to make up some fd and associate it with the "path" that
+  // was provided.
+  EXPECT_CALL(os_syscalls, open(_, O_RDONLY))
+      .WillRepeatedly(Invoke([this](const char* pathname, int) -> Api::SysCallIntResult {
+        int fd = this->next_fd_++;
+        fake_fd_map_[fd] = pathname;
+        return {fd, 0};
+      }));
+
+  // We expect no calls to "setns" at this point, so the string should be empty.
+  EXPECT_EQ(getCurrentNetns(), "");
+
+  // Now check basic functionality to ensure the function is called from a "different netns".
+  std::function<std::string()> func = [&]() -> std::string { return getCurrentNetns(); };
+  auto result = Utility::execInNetworkNamespace(func, "ns1");
+  EXPECT_TRUE(result.ok());
+  EXPECT_EQ(result.value(), "ns1");
+
+  // Make sure the netns reverted back to the netns the execInNetworkNamespace function was called
+  // from. When the netns was noted before making the jump, it used the fd of "/proc/self/ns/net"
+  // and that is what would show up for the test.
+  EXPECT_EQ(getCurrentNetns(), "/proc/self/ns/net");
+
+  // Try another netns.
+  result = Utility::execInNetworkNamespace(func, "ns2");
+  EXPECT_TRUE(result.ok());
+  EXPECT_EQ(result.value(), "ns2");
+
+  // Make sure the netns reverted back.
+  EXPECT_EQ(getCurrentNetns(), "/proc/self/ns/net");
+}
+
+TEST_F(ExecInNetnsTest, OpenFail) {
+  // Make the tests use mock syscalls.
+  testing::StrictMock<Api::MockLinuxOsSysCalls> linux_os_syscalls;
+  testing::StrictMock<Api::MockOsSysCalls> os_syscalls;
+  TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_syscalls);
+  TestThreadsafeSingletonInjector<Api::LinuxOsSysCallsImpl> linux_os_calls(&linux_os_syscalls);
+
+  // Open will always fail.
+  EXPECT_CALL(os_syscalls, open(_, O_RDONLY))
+      .WillRepeatedly(Invoke([](const char*, int) -> Api::SysCallIntResult { return {-1, -1}; }));
+
+  // No other syscalls are expected.
+
+  // Expecting failure.
+  auto result = Utility::execInNetworkNamespace([]() -> int { return 0; }, "bleh");
+  EXPECT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().message().starts_with("failed to open netns file"));
+}
+
+TEST_F(ExecInNetnsTest, FailtoReturnToOriginalNetns) {
+  EXPECT_DEATH(
+      {
+        // Make the tests use mock syscalls.
+        testing::StrictMock<Api::MockLinuxOsSysCalls> linux_os_syscalls;
+        testing::StrictMock<Api::MockOsSysCalls> os_syscalls;
+        TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_syscalls);
+        TestThreadsafeSingletonInjector<Api::LinuxOsSysCallsImpl> linux_os_calls(
+            &linux_os_syscalls);
+
+        EXPECT_CALL(os_syscalls, open(_, O_RDONLY))
+            .WillRepeatedly(
+                Invoke([](const char*, int) -> Api::SysCallIntResult { return {1337, 0}; }));
+        EXPECT_CALL(os_syscalls, close(_)).WillRepeatedly(Invoke([](int) -> Api::SysCallIntResult {
+          return {0, 0};
+        }));
+
+        // Succeed on the first network namespace syscall, which would jump to a different netns.
+        // The second call, which would jump back to the original netns, should fail. This is an
+        // unrecoverable error, so it should result in process death.
+        EXPECT_CALL(linux_os_syscalls, setns(_, _))
+            .WillOnce(Invoke([](int, int) -> Api::SysCallIntResult { return {0, 0}; }))
+            .WillOnce(Invoke([](int, int) -> Api::SysCallIntResult { return {-1, -1}; }));
+
+        auto _ = Utility::execInNetworkNamespace([]() -> int { return 0; }, "bleh");
+      },
+      "failed to restore original netns .*");
 }
 #endif
 

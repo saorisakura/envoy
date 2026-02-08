@@ -11,11 +11,11 @@ envoy_package()
 envoy_cc_library(
     name = "config_provider_interface",
     hdrs = ["config_provider.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         "//envoy/common:time_interface",
         "//source/common/common:assert_lib",
         "//source/common/protobuf",
+        "@abseil-cpp//absl/types:optional",
     ],
 )
 
@@ -43,7 +43,7 @@ envoy_cc_library(
     hdrs = ["context_provider.h"],
     deps = [
         "//envoy/common:callback",
-        "@com_github_cncf_xds//xds/core/v3:pkg_cc_proto",
+        "@xds//xds/core/v3:pkg_cc_proto",
     ],
 )
 
@@ -89,8 +89,8 @@ envoy_cc_library(
         ":custom_config_validators_interface",
         ":subscription_interface",
         "//envoy/common:backoff_strategy_interface",
-        "@com_github_cncf_xds//xds/core/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@xds//xds/core/v3:pkg_cc_proto",
     ],
 )
 
@@ -125,12 +125,12 @@ envoy_cc_library(
 envoy_cc_library(
     name = "xds_resources_delegate_interface",
     hdrs = ["xds_resources_delegate.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":subscription_interface",
         ":typed_config_interface",
         "//envoy/api:api_interface",
         "//envoy/protobuf:message_validator_interface",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
     ],
 )
@@ -153,5 +153,18 @@ envoy_cc_library(
     hdrs = ["eds_resources_cache.h"],
     deps = [
         "@envoy_api//envoy/config/endpoint/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_library(
+    name = "xds_manager_interface",
+    hdrs = ["xds_manager.h"],
+    deps = [
+        ":grpc_mux_interface",
+        ":subscription_factory_interface",
+        ":xds_config_tracker_interface",
+        ":xds_resources_delegate_interface",
+        "//envoy/upstream:cluster_manager_interface",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )

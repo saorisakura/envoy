@@ -1,75 +1,15 @@
-load("@aspect_bazel_lib//lib:jq.bzl", "jq")
-load("@aspect_bazel_lib//lib:yq.bzl", "yq")
-load("@base_pip3//:requirements.bzl", "requirement", base_entry_point = "entry_point")
-load("@envoy_toolshed//py:macros.bzl", "entry_point")
+load("@base_pip3//:requirements.bzl", "requirement")
+load("@envoy_toolshed//:utils.bzl", "json_merge")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
-
-ENVOY_PYTOOL_NAMESPACE = [
-    ":py-init",
-    "@envoy//:py-init",
-    "@envoy//tools:py-init",
-]
-
-def envoy_pytool_binary(
-        name,
-        data = None,
-        init_data = ENVOY_PYTOOL_NAMESPACE,
-        **kwargs):
-    """Wraps py_binary with envoy namespaced __init__.py files.
-
-    If used outside of tools/${toolname}/BUILD you must specify the init_data."""
-    py_binary(
-        name = name,
-        data = init_data + (data or []),
-        **kwargs
-    )
-
-def envoy_pytool_library(
-        name,
-        data = None,
-        init_data = ENVOY_PYTOOL_NAMESPACE,
-        **kwargs):
-    """Wraps py_library with envoy namespaced __init__.py files.
-
-    If used outside of tools/${toolname}/BUILD you must specify the init_data."""
-    py_library(
-        name = name,
-        data = init_data + (data or []),
-        **kwargs
-    )
-
-def envoy_entry_point(
-        name,
-        pkg,
-        entry_point_script = "@envoy//tools/base:entry_point.py",
-        entry_point_alias = base_entry_point,
-        script = None,
-        data = None,
-        init_data = ENVOY_PYTOOL_NAMESPACE,
-        deps = None,
-        args = None,
-        visibility = ["//visibility:public"]):
-    entry_point(
-        name = name,
-        pkg = pkg,
-        script = script,
-        entry_point_script = entry_point_script,
-        entry_point_alias = entry_point_alias,
-        data = (data or []) + init_data,
-        deps = deps,
-        args = args,
-        visibility = visibility,
-    )
+load("@rules_python//python/entry_points:py_console_script_binary.bzl", "py_console_script_binary")
 
 def envoy_jinja_env(
         name,
         templates,
         filters = {},
         env_kwargs = {},
-        init_data = ENVOY_PYTOOL_NAMESPACE,
         data = [],
-        deps = [],
-        entry_point_alias = base_entry_point):
+        deps = []):
     """This provides a prebuilt jinja environment that can be imported as a module.
 
     Templates are compiled to a python module for faster loading, and the generated environment
@@ -155,12 +95,11 @@ def envoy_jinja_env(
         ],
     )
 
-    envoy_entry_point(
+    py_console_script_binary(
         name = name_entry_point,
-        pkg = "envoy.base.utils",
+        pkg = "@base_pip3//envoy_base_utils",
         script = "envoy.jinja_env",
         deps = deps,
-        entry_point_alias = entry_point_alias,
     )
 
     native.genrule(
@@ -189,73 +128,17 @@ def envoy_jinja_env(
         tools = [name_templates],
     )
 
-    envoy_pytool_library(
+    py_library(
         name = name,
         srcs = [name_env_py],
-        init_data = init_data,
         data = [name_templates],
         deps = [name_entry_point],
-    )
-
-def envoy_genjson(name, srcs = [], yaml_srcs = [], filter = None, args = None):
-    '''Generate JSON from JSON and YAML sources
-
-    By default the sources will be merged in jq `slurp` mode.
-
-    Specify a jq `filter` to mangle the data.
-
-    Example - places the sources into a dictionary with separate keys, but merging
-    the data from one of the JSON files with the data from the YAML file:
-
-    ```starlark
-
-    envoy_genjson(
-        name = "myjson",
-        srcs = [
-            ":json_data.json",
-            "@com_somewhere//:other_json_data.json",
-        ],
-        yaml_srcs = [
-            ":yaml_data.yaml",
-        ],
-        filter = """
-        {first_data: .[0], rest_of_data: .[1] * .[2]}
-        """,
-    )
-
-    ```
-    '''
-    if not srcs and not yaml_srcs:
-        fail("At least one of `srcs` or `yaml_srcs` must be provided")
-
-    yaml_json = []
-    for i, yaml_src in enumerate(yaml_srcs):
-        yaml_name = "%s_yaml_%s" % (name, i)
-        yq(
-            name = yaml_name,
-            srcs = [yaml_src],
-            args = ["-o=json"],
-            outs = ["%s.json" % yaml_name],
-        )
-        yaml_json.append(yaml_name)
-
-    all_srcs = srcs + yaml_json
-    args = args or ["--slurp"]
-    filter = filter or " *".join([(".[%s]" % i) for i, x in enumerate(all_srcs)])
-    jq(
-        name = name,
-        srcs = all_srcs,
-        out = "%s.json" % name,
-        args = args,
-        filter = filter,
     )
 
 def envoy_py_data(
         name,
         src,
-        init_data = ENVOY_PYTOOL_NAMESPACE,
-        format = None,
-        entry_point_alias = base_entry_point):
+        format = None):
     """Preload JSON/YAML data as a python lib.
 
     Data is loaded to python and then dumped to a pickle file.
@@ -305,10 +188,9 @@ def envoy_py_data(
     name_env_py = "%s.py" % name
     pickle_arg = "$(location %s)" % name_pickle
 
-    envoy_entry_point(
+    py_console_script_binary(
         name = name_entry_point,
-        entry_point_alias = entry_point_alias,
-        pkg = "envoy.base.utils",
+        pkg = "@base_pip3//envoy_base_utils",
         script = "envoy.data_env",
     )
 
@@ -336,10 +218,9 @@ def envoy_py_data(
         tools = [name_pickle],
     )
 
-    envoy_pytool_library(
+    py_library(
         name = name,
         srcs = [name_env_py],
-        init_data = init_data,
         data = [name_pickle],
         deps = [name_entry_point, requirement("envoy.base.utils")],
     )
@@ -350,7 +231,6 @@ def envoy_gencontent(
         output,
         srcs = [],
         yaml_srcs = [],
-        init_data = ENVOY_PYTOOL_NAMESPACE,
         json_kwargs = {},
         template_name = None,
         template_filters = {},
@@ -358,11 +238,10 @@ def envoy_gencontent(
             "trim_blocks": True,
             "lstrip_blocks": True,
         },
-        template_deps = [],
-        entry_point_alias = base_entry_point):
+        template_deps = []):
     '''Generate templated output from a Jinja template and JSON/Yaml sources.
 
-    `srcs`, `yaml_srcs` and `**json_kwargs` are passed to `envoy_genjson`.
+    `srcs`, `yaml_srcs` and `**json_kwargs` are passed to `json_merge`.
 
     Args prefixed with `template_` are passed to `envoy_jinja_env`.
 
@@ -389,7 +268,7 @@ def envoy_gencontent(
     name_tpl = "%s_jinja" % name
     name_template_bin = ":%s_generate_content" % name
 
-    envoy_genjson(
+    json_merge(
         name = "%s_json" % name,
         srcs = srcs,
         yaml_srcs = yaml_srcs,
@@ -398,16 +277,12 @@ def envoy_gencontent(
     envoy_py_data(
         name = "%s_data" % name,
         src = ":%s_json" % name,
-        init_data = init_data,
-        entry_point_alias = entry_point_alias,
     )
     envoy_jinja_env(
         name = name_tpl,
-        init_data = init_data,
         env_kwargs = template_kwargs,
         templates = [template],
         filters = template_filters,
-        entry_point_alias = entry_point_alias,
     )
     native.genrule(
         name = "%s_generate_content_py" % name,
@@ -424,11 +299,10 @@ def envoy_gencontent(
         outs = ["%s_generate_content.py" % name],
         tools = [":%s" % name_data, name_tpl, template],
     )
-    envoy_pytool_binary(
+    py_binary(
         name = "%s_generate_content" % name,
         main = ":%s_generate_content.py" % name,
         srcs = [":%s_generate_content.py" % name],
-        init_data = init_data,
         deps = [
             ":%s" % name_data,
             name_tpl,

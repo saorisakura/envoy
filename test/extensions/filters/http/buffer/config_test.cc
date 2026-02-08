@@ -105,12 +105,27 @@ TEST(BufferFilterFactoryTest, BufferFilterRouteSpecificConfig) {
   cfg.set_disabled(true);
 
   Router::RouteSpecificFilterConfigConstSharedPtr route_config =
-      factory.createRouteSpecificFilterConfig(*proto_config, factory_context,
-                                              ProtobufMessage::getNullValidationVisitor());
+      factory
+          .createRouteSpecificFilterConfig(*proto_config, factory_context,
+                                           ProtobufMessage::getNullValidationVisitor())
+          .value();
   EXPECT_TRUE(route_config.get());
 
   const auto* inflated = dynamic_cast<const BufferFilterSettings*>(route_config.get());
   EXPECT_TRUE(inflated);
+}
+
+TEST(BufferFilterFactoryTest, BufferFilterCorrectProtoWithServerContext) {
+  envoy::extensions::filters::http::buffer::v3::Buffer config;
+  config.mutable_max_request_bytes()->set_value(1028);
+
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  BufferFilterFactory factory;
+  Http::FilterFactoryCb cb =
+      factory.createFilterFactoryFromProtoWithServerContext(config, "stats", context);
+  Http::MockFilterChainFactoryCallbacks filter_callback;
+  EXPECT_CALL(filter_callback, addStreamDecoderFilter(_));
+  cb(filter_callback);
 }
 
 } // namespace

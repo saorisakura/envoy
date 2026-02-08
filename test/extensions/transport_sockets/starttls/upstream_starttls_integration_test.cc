@@ -89,7 +89,7 @@ public:
       read_callbacks_ = &callbacks;
     }
 
-    std::weak_ptr<StartTlsSwitchFilter> parent_{};
+    std::weak_ptr<StartTlsSwitchFilter> parent_;
     Network::ReadFilterCallbacks* read_callbacks_{};
   };
 
@@ -118,17 +118,17 @@ private:
                        Network::ConnectionCallbacks* upstream_callbacks)
       : upstream_connection_cb_(upstream_callbacks), cluster_manager_(cluster_manager) {}
 
-  std::weak_ptr<StartTlsSwitchFilter> self_{};
+  std::weak_ptr<StartTlsSwitchFilter> self_;
   Network::ReadFilterCallbacks* read_callbacks_{};
   Network::WriteFilterCallbacks* write_callbacks_{};
-  Network::ClientConnectionPtr upstream_connection_{};
+  Network::ClientConnectionPtr upstream_connection_;
   Network::ConnectionCallbacks* upstream_connection_cb_;
   Upstream::ClusterManager& cluster_manager_;
 };
 
 Network::FilterStatus StartTlsSwitchFilter::onNewConnection() {
   auto c = cluster_manager_.getThreadLocalCluster("cluster_0");
-  auto h = c->loadBalancer().chooseHost(nullptr);
+  auto h = c->loadBalancer().chooseHost(nullptr).host;
   upstream_connection_ =
       h->createConnection(read_callbacks_->connection().dispatcher(), nullptr, nullptr).connection_;
   upstream_connection_->addConnectionCallbacks(*upstream_connection_cb_);
@@ -271,11 +271,11 @@ void StartTlsIntegrationTest::initialize() {
   NiceMock<Server::Configuration::MockTransportSocketFactoryContext> mock_factory_ctx;
   ON_CALL(mock_factory_ctx.server_context_, api()).WillByDefault(testing::ReturnRef(*api_));
   auto cfg = *Extensions::TransportSockets::Tls::ServerContextConfigImpl::create(
-      downstream_tls_context, mock_factory_ctx, false);
+      downstream_tls_context, mock_factory_ctx, {}, false);
   static auto* client_stats_store = new Stats::TestIsolatedStoreImpl();
   tls_context_ = Network::DownstreamTransportSocketFactoryPtr{
       *Extensions::TransportSockets::Tls::ServerSslSocketFactory::create(
-          std::move(cfg), *tls_context_manager_, *client_stats_store->rootScope(), {})};
+          std::move(cfg), *tls_context_manager_, *client_stats_store->rootScope())};
 
   BaseIntegrationTest::initialize();
 }

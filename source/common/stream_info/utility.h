@@ -104,6 +104,7 @@ public:
   constexpr static absl::string_view DNS_FAIL = "DF";
   constexpr static absl::string_view DROP_OVERLOAD = "DO";
   constexpr static absl::string_view DOWNSTREAM_REMOTE_RESET = "DR";
+  constexpr static absl::string_view UNCONDITIONAL_DROP_OVERLOAD = "UDO";
 
   constexpr static absl::string_view DOWNSTREAM_CONNECTION_TERMINATION_LONG =
       "DownstreamConnectionTermination";
@@ -140,6 +141,7 @@ public:
   constexpr static absl::string_view DNS_FAIL_LONG = "DnsResolutionFailed";
   constexpr static absl::string_view DROP_OVERLOAD_LONG = "DropOverload";
   constexpr static absl::string_view DOWNSTREAM_REMOTE_RESET_LONG = "DownstreamRemoteReset";
+  constexpr static absl::string_view UNCONDITIONAL_DROP_OVERLOAD_LONG = "UnconditionalDropOverload";
 
   static constexpr std::array CORE_RESPONSE_FLAGS{
       FlagStrings{FAILED_LOCAL_HEALTH_CHECK, FAILED_LOCAL_HEALTH_CHECK_LONG,
@@ -189,6 +191,8 @@ public:
       FlagStrings{DROP_OVERLOAD, DROP_OVERLOAD_LONG, CoreResponseFlag::DropOverLoad},
       FlagStrings{DOWNSTREAM_REMOTE_RESET, DOWNSTREAM_REMOTE_RESET_LONG,
                   CoreResponseFlag::DownstreamRemoteReset},
+      FlagStrings{UNCONDITIONAL_DROP_OVERLOAD, UNCONDITIONAL_DROP_OVERLOAD_LONG,
+                  CoreResponseFlag::UnconditionalDropOverload},
   };
 
 private:
@@ -216,9 +220,11 @@ public:
   absl::optional<std::chrono::nanoseconds> lastUpstreamTxByteSent();
   absl::optional<std::chrono::nanoseconds> firstUpstreamRxByteReceived();
   absl::optional<std::chrono::nanoseconds> lastUpstreamRxByteReceived();
+  absl::optional<std::chrono::nanoseconds> firstUpstreamRxBodyByteReceived();
   absl::optional<std::chrono::nanoseconds> upstreamHandshakeComplete();
   absl::optional<std::chrono::nanoseconds> firstDownstreamTxByteSent();
   absl::optional<std::chrono::nanoseconds> lastDownstreamTxByteSent();
+  absl::optional<std::chrono::nanoseconds> lastDownstreamHeaderRxByteReceived();
   absl::optional<std::chrono::nanoseconds> lastDownstreamRxByteReceived();
   absl::optional<std::chrono::nanoseconds> downstreamHandshakeComplete();
   absl::optional<std::chrono::nanoseconds> lastDownstreamAckReceived();
@@ -234,10 +240,14 @@ class Utility {
 public:
   /**
    * @param address supplies the downstream address.
-   * @return a properly formatted address for logs, header expansion, etc.
+   * @param mask_prefix_len optional CIDR prefix length to mask the address. If not provided,
+   * returns the unmasked IP address (without port).
+   * @return the IP address without port, or masked IP address in CIDR notation if mask_prefix_len
+   * is specified (e.g., "10.1.0.0/16"), or empty string if masking fails.
    */
-  static const std::string&
-  formatDownstreamAddressNoPort(const Network::Address::Instance& address);
+  static const std::string
+  formatDownstreamAddressNoPort(const Network::Address::Instance& address,
+                                absl::optional<int> mask_prefix_len = absl::nullopt);
 
   /**
    * @param address supplies the downstream address.
@@ -252,6 +262,14 @@ public:
    */
   static absl::optional<uint32_t>
   extractDownstreamAddressJustPort(const Network::Address::Instance& address);
+
+  /**
+   * @param address supplies the downstream address.
+   * @return the endpoint id of an EnvoyInternalAddress, extracted from the provided downstream
+   * address for logs, header expansion, etc.
+   */
+  static const std::string
+  formatDownstreamAddressJustEndpointId(const Network::Address::Instance& address);
 };
 
 // Static utils for creating, consuming, and producing strings from the

@@ -7,6 +7,7 @@ the use_category metadata in bazel/repository_locations.bzl.
 
 import asyncio
 import json
+import os
 import pathlib
 import re
 import sys
@@ -48,11 +49,17 @@ def test_only_ignore(dep):
     return False
 
 
-query = bazel.BazelEnv(envoy_repo.PATH).query
+query = bazel.BazelEnv(
+    envoy_repo.PATH, startup_options=os.environ.get("BAZEL_STARTUP_OPTION_LIST", "").split()).query
 
 
 class DependencyError(Exception):
     """Error in dependency relationships."""
+    pass
+
+
+class MissingDependencyMetadataError(DependencyError):
+    """Error when a dependency is missing required metadata."""
     pass
 
 
@@ -70,10 +77,25 @@ class DependencyInfo:
 
         Returns:
           Set of dependency identifiers that match use_category.
+
+        Raises:
+          MissingDependencyMetadataError: If a dependency has no use_category.
         """
-        return set(
-            name for name, metadata in self.repository_locations.items()
-            if use_category in metadata['use_category'])
+        result = set()
+        missing_metadata = []
+        for name, metadata in self.repository_locations.items():
+            use_categories = metadata.get('use_category', [])
+            if not use_categories:
+                missing_metadata.append(name)
+            if use_category in use_categories:
+                result.add(name)
+
+        if missing_metadata:
+            raise MissingDependencyMetadataError(
+                f"Dependencies missing 'use_category' in bazel/deps.yaml or api/bazel/deps.yaml: "
+                f"{', '.join(sorted(missing_metadata))}")
+
+        return result
 
     def get_metadata(self, dependency):
         """Obtain repository metadata for a dependency.
@@ -131,7 +153,10 @@ class BuildGraph:
         return deps - exclude_deps
 
     async def _deps_query(self, query_string):
-        return self._mangle_deps_set(await query(query_string))
+        return self._mangle_deps_set(
+            await query(
+                query_string,
+                query_options=tuple(os.environ.get("BAZEL_QUERY_OPTION_LIST", "").split())))
 
     def _filtered_deps_query(self, targets):
         return f'filter("^@.*//", deps(set({" ".join(targets)})))'
@@ -194,7 +219,8 @@ class Validator(object):
           DependencyError: on a dependency validation error.
         """
         # Validate that //source doesn't depend on test_only
-        queried_source_deps = await self._build_graph.query_external_deps('//source/...')
+        queried_source_deps = await self._build_graph.query_external_deps(
+            '//source/...', exclude=["//source/extensions/dynamic_modules/sdk/cpp/..."])
         expected_test_only_deps = self._dep_info.deps_by_use_category('test_only')
         bad_test_only_deps = expected_test_only_deps.intersection(queried_source_deps)
         if len(bad_test_only_deps) > 0:
@@ -231,6 +257,11 @@ class Validator(object):
         # It's hard to disentangle API and dataplane today.
         expected_dataplane_core_deps = self._dep_info.deps_by_use_category('dataplane_core').union(
             self._dep_info.deps_by_use_category('api'))
+
+        # Disregard boringssl_fips since it is the same as boringssl.
+        queried_dataplane_core_min_deps = queried_dataplane_core_min_deps.difference(
+            ['boringssl_fips'])
+
         bad_dataplane_core_deps = queried_dataplane_core_min_deps.difference(
             expected_dataplane_core_deps)
         print(f'Validating {len(expected_dataplane_core_deps)} data-plane dependencies...')
@@ -254,6 +285,11 @@ class Validator(object):
         # these paths.
         queried_controlplane_core_min_deps = await self._build_graph.query_external_deps(
             '//source/common/config/...')
+
+        # Disregard boringssl_fips since it is the same as boringssl.
+        queried_controlplane_core_min_deps = queried_controlplane_core_min_deps.difference(
+            ['boringssl_fips'])
+
         # Controlplane will always depend on API.
         expected_controlplane_core_deps = self._dep_info.deps_by_use_category('controlplane').union(
             self._dep_info.deps_by_use_category('api'))

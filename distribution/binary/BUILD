@@ -1,11 +1,8 @@
 load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
 load("@rules_pkg//pkg:pkg.bzl", "pkg_tar")
-load("//bazel:envoy_build_system.bzl", "envoy_package")
 load("//distribution/binary:compiler.bzl", "bundled")
 
 licenses(["notice"])  # Apache 2
-
-envoy_package()
 
 bundled(
     name = "envoy",
@@ -18,7 +15,7 @@ bundled(
         "//distribution:envoy-dwarf": "dbg/envoy.dwp",
         "//distribution:envoy-contrib-binary": "dbg/envoy-contrib",
         "//distribution:envoy-contrib-dwarf": "dbg/envoy-contrib.dwp",
-        "//external:su-exec": "utils/su-exec",
+        "@su-exec": "utils/su-exec",
     },
 )
 
@@ -39,7 +36,7 @@ pkg_tar(
     srcs = [
         ":release_files",
     ],
-    compressor = "//tools/zstd",
+    compressor = "@zstd//:zstd_cli",
     compressor_args = "-T0",
     extension = "tar.zst",
 )

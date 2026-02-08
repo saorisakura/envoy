@@ -13,22 +13,26 @@ envoy_cc_library(
     hdrs = ["address.h"],
     deps = [
         "//envoy/common:base_includes",
+        "//envoy/common:optref_lib",
         "//envoy/common:pure_lib",
+        "//envoy/stream_info:filter_state_interface",
     ],
 )
 
 envoy_cc_library(
     name = "connection_interface",
     hdrs = ["connection.h"],
-    external_deps = ["abseil_int128"],
     deps = [
         ":address_interface",
         ":filter_interface",
         ":listen_socket_interface",
         "//envoy/buffer:buffer_interface",
+        "//envoy/common:scope_tracker_interface",
         "//envoy/event:deferred_deletable",
         "//envoy/ssl:connection_interface",
         "//envoy/stream_info:stream_info_interface",
+        "@abseil-cpp//absl/numeric:int128",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -84,7 +88,10 @@ envoy_cc_library(
 envoy_cc_library(
     name = "dns_interface",
     hdrs = ["dns.h"],
-    deps = ["//envoy/network:address_interface"],
+    deps = [
+        "//envoy/common:time_interface",
+        "//envoy/network:address_interface",
+    ],
 )
 
 envoy_cc_library(
@@ -99,8 +106,11 @@ envoy_cc_library(
 envoy_cc_library(
     name = "drain_decision_interface",
     hdrs = ["drain_decision.h"],
-    external_deps = ["abseil_base"],
-    deps = ["//envoy/common:callback"],
+    deps = [
+        "//envoy/common:callback",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/status",
+    ],
 )
 
 envoy_cc_library(
@@ -115,8 +125,10 @@ envoy_cc_library(
         ":listen_socket_interface",
         ":listener_filter_buffer_interface",
         ":transport_socket_interface",
+        "//envoy/access_log:access_log_interface",
         "//envoy/buffer:buffer_interface",
         "//envoy/config:extension_config_provider_interface",
+        "//envoy/config:typed_metadata_interface",
         "//envoy/stream_info:stream_info_interface",
         "//envoy/upstream:host_description_interface",
         "//source/common/protobuf",
@@ -126,23 +138,24 @@ envoy_cc_library(
 envoy_cc_library(
     name = "hash_policy_interface",
     hdrs = ["hash_policy.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":connection_interface",
+        "@abseil-cpp//absl/types:optional",
     ],
 )
 
 envoy_cc_library(
     name = "io_handle_interface",
     hdrs = ["io_handle.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":address_interface",
         "//envoy/api:io_error_interface",
         "//envoy/api:os_sys_calls_interface",
         "//envoy/buffer:buffer_interface",
         "//envoy/event:file_event_interface",
+        "//source/common/buffer:buffer_lib",
         "//source/common/common:assert_lib",
+        "@abseil-cpp//absl/types:optional",
     ],
 )
 
@@ -172,7 +185,6 @@ envoy_cc_library(
     deps = [
         ":io_handle_interface",
         ":socket_interface",
-        "//envoy/common:scope_tracker_interface",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )

@@ -29,9 +29,10 @@ constexpr const char* GetAccessTokenBodyFormatStringWithScopes =
 
 } // namespace
 
-OAuth2Client::GetTokenResult OAuth2ClientImpl::asyncGetAccessToken(const std::string& client_id,
-                                                                   const std::string& secret,
-                                                                   const std::string& scopes) {
+OAuth2Client::GetTokenResult
+OAuth2ClientImpl::asyncGetAccessToken(const std::string& client_id, const std::string& secret,
+                                      const std::string& scopes,
+                                      const std::map<std::string, std::string>& endpoint_params) {
   if (in_flight_request_ != nullptr) {
     return GetTokenResult::NotDispatchedAlreadyInFlight;
   }
@@ -39,13 +40,21 @@ OAuth2Client::GetTokenResult OAuth2ClientImpl::asyncGetAccessToken(const std::st
   const auto encoded_secret = Envoy::Http::Utility::PercentEncoding::encode(secret, ":/=&?");
 
   Envoy::Http::RequestMessagePtr request = createPostRequest();
-  const std::string body =
-      fmt::format(GetAccessTokenBodyFormatString, encoded_client_id, encoded_secret);
-  if (!(scopes.empty())) {
+  std::string body;
+  if (scopes.empty()) {
+    body = fmt::format(GetAccessTokenBodyFormatString, encoded_client_id, encoded_secret);
+  } else {
     const auto encoded_scopes = Envoy::Http::Utility::PercentEncoding::encode(scopes, ":/=&?");
-    const std::string body = fmt::format(GetAccessTokenBodyFormatStringWithScopes,
-                                         encoded_client_id, encoded_secret, encoded_scopes);
+    body = fmt::format(GetAccessTokenBodyFormatStringWithScopes, encoded_client_id, encoded_secret,
+                       encoded_scopes);
   }
+
+  for (const auto& [param_name, param_value] : endpoint_params) {
+    const auto encoded_name = Envoy::Http::Utility::PercentEncoding::encode(param_name, ":/=&?");
+    const auto encoded_value = Envoy::Http::Utility::PercentEncoding::encode(param_value, ":/=&?");
+    body += fmt::format("&{}={}", encoded_name, encoded_value);
+  }
+
   request->body().add(body);
   request->headers().setContentLength(body.length());
   return dispatchRequest(std::move(request));

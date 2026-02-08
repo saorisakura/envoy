@@ -11,7 +11,6 @@ envoy_extension_package()
 envoy_cc_library(
     name = "async_files_base",
     srcs = [
-        "async_file_action.cc",
         "async_file_context_base.cc",
     ],
     hdrs = [
@@ -22,10 +21,11 @@ envoy_cc_library(
     ],
     deps = [
         ":status_after_file_error",
+        "//envoy/event:dispatcher_interface",
         "//source/common/buffer:buffer_lib",
         "//source/common/common:utility_lib",
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/status:statusor",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )
 
@@ -44,8 +44,8 @@ envoy_cc_library(
         ":status_after_file_error",
         "//source/common/api:os_sys_calls_lib",
         "//source/common/buffer:buffer_lib",
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/status:statusor",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/status:statusor",
         "@envoy_api//envoy/extensions/common/async_files/v3:pkg_cc_proto",
     ],
 )
@@ -53,7 +53,6 @@ envoy_cc_library(
 envoy_cc_library(
     name = "async_files",
     srcs = [
-        "async_file_manager.cc",
         "async_file_manager_factory.cc",
     ],
     hdrs = [
@@ -64,8 +63,8 @@ envoy_cc_library(
         "//source/common/api:os_sys_calls_lib",
         "//source/common/buffer:buffer_lib",
         "//source/common/protobuf:utility_lib",
-        "@com_google_absl//absl/base",
-        "@com_google_absl//absl/status:statusor",
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/status:statusor",
         "@envoy_api//envoy/extensions/common/async_files/v3:pkg_cc_proto",
     ],
 )
@@ -78,6 +77,6 @@ envoy_cc_library(
         "//envoy/api:os_sys_calls_interface",
         "//source/common/common:assert_lib",
         "//source/common/common:utility_lib",
-        "@com_google_absl//absl/status",
+        "@abseil-cpp//absl/status",
     ],
 )

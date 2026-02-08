@@ -34,6 +34,7 @@
 #include "source/common/router/config_impl.h"
 #include "source/common/router/debug_config.h"
 #include "source/common/router/router.h"
+#include "source/common/router/upstream_codec_filter.h"
 #include "source/common/stream_info/uint32_accessor_impl.h"
 #include "source/common/tracing/http_tracer_impl.h"
 #include "source/extensions/common/proxy_protocol/proxy_protocol_header.h"
@@ -47,11 +48,9 @@ public:
   UpstreamFilterManager(Http::FilterManagerCallbacks& filter_manager_callbacks,
                         Event::Dispatcher& dispatcher, OptRef<const Network::Connection> connection,
                         uint64_t stream_id, Buffer::BufferMemoryAccountSharedPtr account,
-                        bool proxy_100_continue, uint32_t buffer_limit,
-                        const Http::FilterChainFactory& filter_chain_factory,
-                        UpstreamRequest& request)
+                        bool proxy_100_continue, uint32_t buffer_limit, UpstreamRequest& request)
       : FilterManager(filter_manager_callbacks, dispatcher, connection, stream_id, account,
-                      proxy_100_continue, buffer_limit, filter_chain_factory),
+                      proxy_100_continue, buffer_limit),
         upstream_request_(request) {}
 
   StreamInfo::StreamInfo& streamInfo() override {
@@ -83,19 +82,24 @@ UpstreamRequest::UpstreamRequest(RouterFilterInterface& parent,
                                  bool can_send_early_data, bool can_use_http3,
                                  bool enable_half_close)
     : parent_(parent), conn_pool_(std::move(conn_pool)),
-      stream_info_(parent_.callbacks()->dispatcher().timeSource(), nullptr,
+      stream_info_(parent_.callbacks()->dispatcher().timeSource(),
+                   parent_.callbacks()->connection().has_value()
+                       ? parent_.callbacks()->connection()->connectionInfoProviderSharedPtr()
+                       : nullptr,
                    StreamInfo::FilterState::LifeSpan::FilterChain),
       start_time_(parent_.callbacks()->dispatcher().timeSource().monotonicTime()),
-      calling_encode_headers_(false), upstream_canary_(false), router_sent_end_stream_(false),
-      encode_trailers_(false), retried_(false), awaiting_headers_(true),
-      outlier_detection_timeout_recorded_(false),
+      upstream_canary_(false), router_sent_end_stream_(false), encode_trailers_(false),
+      retried_(false), awaiting_headers_(true), outlier_detection_timeout_recorded_(false),
       create_per_try_timeout_on_request_complete_(false), paused_for_connect_(false),
       paused_for_websocket_(false), reset_stream_(false),
       record_timeout_budget_(parent_.cluster()->timeoutBudgetStats().has_value()),
       cleaned_up_(false), had_upstream_(false),
       stream_options_({can_send_early_data, can_use_http3}), grpc_rq_success_deferred_(false),
       enable_half_close_(enable_half_close) {
-  if (auto tracing_config = parent_.callbacks()->tracingConfig(); tracing_config.has_value()) {
+  // Get tracing config once and reuse it.
+  auto tracing_config = parent_.callbacks()->tracingConfig();
+
+  if (tracing_config.has_value()) {
     if (tracing_config->spawnUpstreamSpan() || parent_.config().start_child_span_) {
       span_ = parent_.callbacks()->activeSpan().spawnChild(
           tracing_config.value().get(),
@@ -110,24 +114,35 @@ UpstreamRequest::UpstreamRequest(RouterFilterInterface& parent,
 
   // The router checks that the connection pool is non-null before creating the upstream request.
   auto upstream_host = conn_pool_->host();
-  Tracing::HttpTraceContext trace_context(*parent_.downstreamHeaders());
-  Tracing::UpstreamContext upstream_context(upstream_host.get(),           // host_
-                                            &upstream_host->cluster(),     // cluster_
-                                            Tracing::ServiceType::Unknown, // service_type_
-                                            false                          // async_client_span_
-  );
 
-  if (span_ != nullptr) {
-    span_->injectContext(trace_context, upstream_context);
-  } else {
-    // No independent child span for current upstream request then inject the parent span's tracing
-    // context into the request headers.
-    // The injectContext() of the parent span may be called repeatedly when the request is retried.
-    parent_.callbacks()->activeSpan().injectContext(trace_context, upstream_context);
+  // Only inject trace context if propagation is not disabled.
+  // When noContextPropagation is true, spans are still reported but trace context
+  // headers (e.g., traceparent, X-B3-*) are not injected into upstream requests.
+  const bool no_context_propagation =
+      tracing_config.has_value() && tracing_config->noContextPropagation();
+
+  if (!no_context_propagation) {
+    Tracing::HttpTraceContext trace_context(*parent_.downstreamHeaders());
+    Tracing::UpstreamContext upstream_context(upstream_host.get(),           // host_
+                                              &upstream_host->cluster(),     // cluster_
+                                              Tracing::ServiceType::Unknown, // service_type_
+                                              false                          // async_client_span_
+    );
+
+    if (span_ != nullptr) {
+      span_->injectContext(trace_context, upstream_context);
+    } else {
+      // No independent child span for current upstream request then inject the parent span's
+      // tracing context into the request headers.
+      // The injectContext() of the parent span may be called repeatedly when the request is
+      // retried.
+      parent_.callbacks()->activeSpan().injectContext(trace_context, upstream_context);
+    }
   }
 
   stream_info_.setUpstreamInfo(std::make_shared<StreamInfo::UpstreamInfoImpl>());
   stream_info_.route_ = parent_.callbacks()->route();
+  stream_info_.upstreamInfo()->setUpstreamHost(upstream_host);
   parent_.callbacks()->streamInfo().setUpstreamInfo(stream_info_.upstreamInfo());
 
   stream_info_.healthCheck(parent_.callbacks()->streamInfo().healthCheck());
@@ -143,18 +158,18 @@ UpstreamRequest::UpstreamRequest(RouterFilterInterface& parent,
   filter_manager_ = std::make_unique<UpstreamFilterManager>(
       *filter_manager_callbacks_, parent_.callbacks()->dispatcher(), UpstreamRequest::connection(),
       parent_.callbacks()->streamId(), parent_.callbacks()->account(), true,
-      parent_.callbacks()->decoderBufferLimit(), *parent_.cluster(), *this);
+      parent_.callbacks()->bufferLimit(), *this);
   // Attempt to create custom cluster-specified filter chain
-  bool created = parent_.cluster()->createFilterChain(*filter_manager_,
-                                                      /*only_create_if_configured=*/true);
+  bool created = filter_manager_->createFilterChain(*parent_.cluster()).created();
+
   if (!created) {
     // Attempt to create custom router-specified filter chain.
-    created = parent_.config().createFilterChain(*filter_manager_);
+    created = filter_manager_->createFilterChain(parent_.config()).created();
   }
   if (!created) {
     // Neither cluster nor router have a custom filter chain; add the default
     // cluster filter chain, which only consists of the codec filter.
-    created = parent_.cluster()->createFilterChain(*filter_manager_, false);
+    created = filter_manager_->createFilterChain(defaultUpstreamHttpFilterChainFactory()).created();
   }
   // There will always be a codec filter present, which sets the upstream
   // interface. Fast-fail any tests that don't set up mocks correctly.
@@ -216,10 +231,12 @@ void UpstreamRequest::cleanUp() {
   if (req_resp_stats_opt.has_value() && parent_.downstreamHeaders()) {
     auto& req_resp_stats = req_resp_stats_opt->get();
     req_resp_stats.upstream_rq_headers_size_.recordValue(parent_.downstreamHeaders()->byteSize());
+    req_resp_stats.upstream_rq_headers_count_.recordValue(parent_.downstreamHeaders()->size());
     req_resp_stats.upstream_rq_body_size_.recordValue(stream_info_.bytesSent());
 
     if (response_headers_size_.has_value()) {
       req_resp_stats.upstream_rs_headers_size_.recordValue(response_headers_size_.value());
+      req_resp_stats.upstream_rs_headers_count_.recordValue(response_headers_count_.value());
       req_resp_stats.upstream_rs_body_size_.recordValue(stream_info_.bytesReceived());
     }
   }
@@ -239,11 +256,11 @@ void UpstreamRequest::cleanUp() {
 }
 
 void UpstreamRequest::upstreamLog(AccessLog::AccessLogType access_log_type) {
-  const Formatter::HttpFormatterContext log_context{parent_.downstreamHeaders(),
-                                                    upstream_headers_.get(),
-                                                    upstream_trailers_.get(),
-                                                    {},
-                                                    access_log_type};
+  const Formatter::Context log_context{parent_.downstreamHeaders(),
+                                       upstream_headers_.get(),
+                                       upstream_trailers_.get(),
+                                       {},
+                                       access_log_type};
 
   for (const auto& upstream_log : parent_.config().upstream_logs_) {
     upstream_log->log(log_context, stream_info_);
@@ -256,7 +273,7 @@ void UpstreamRequest::decode1xxHeaders(Http::ResponseHeaderMapPtr&& headers) {
   ScopeTrackerScopeState scope(&parent_.callbacks()->scope(), parent_.callbacks()->dispatcher());
 
   ASSERT(Http::HeaderUtility::isSpecial1xx(*headers));
-  addResponseHeadersSize(headers->byteSize());
+  addResponseHeadersStat(headers->byteSize(), headers->size());
   maybeHandleDeferredReadDisable();
   parent_.onUpstream1xxHeaders(std::move(headers), *this);
 }
@@ -271,7 +288,7 @@ void UpstreamRequest::decodeHeaders(Http::ResponseHeaderMapPtr&& headers, bool e
 
   resetPerTryIdleTimer();
 
-  addResponseHeadersSize(headers->byteSize());
+  addResponseHeadersStat(headers->byteSize(), headers->size());
 
   // We drop unsupported 1xx on the floor here. 101 upgrade headers need to be passed to the client
   // as part of the final response. Most 1xx headers are handled in onUpstream1xxHeaders.
@@ -390,10 +407,18 @@ void UpstreamRequest::acceptHeadersFromRouter(bool end_stream) {
     // If this is a websocket upgrade request, pause the request until the upstream sends
     // the 101 Switching Protocols response code. Using the else logic here to obey CONNECT
     // method which is expecting 2xx response.
-  } else if ((Runtime::runtimeFeatureEnabled(
-                 "envoy.reloadable_features.check_switch_protocol_websocket_handshake")) &&
-             Http::Utility::isWebSocketUpgradeRequest(*headers)) {
+  } else if (Http::Utility::isWebSocketUpgradeRequest(*headers)) {
     paused_for_websocket_ = true;
+
+    if (Runtime::runtimeFeatureEnabled(
+            "envoy.reloadable_features.websocket_enable_timeout_on_upgrade_response")) {
+      // For websocket upgrades, we need to set up timeouts immediately
+      // because the upstream request will be paused waiting for the upgrade response.
+      if (!per_try_timeout_) {
+        setupPerTryTimeout();
+      }
+      parent_.setupRouteTimeoutForWebsocketUpgrade();
+    }
   }
 
   // Kick off creation of the upstream connection immediately upon receiving headers.
@@ -462,12 +487,9 @@ void UpstreamRequest::onResetStream(Http::StreamResetReason reason,
   }
   clearRequestEncoder();
   awaiting_headers_ = false;
-  if (!calling_encode_headers_) {
-    stream_info_.setResponseFlag(Filter::streamResetReasonToResponseFlag(reason));
-    parent_.onUpstreamReset(reason, transport_failure_reason, *this);
-  } else {
-    deferred_reset_reason_ = reason;
-  }
+
+  stream_info_.setResponseFlag(Filter::streamResetReasonToResponseFlag(reason));
+  parent_.onUpstreamReset(reason, transport_failure_reason, *this);
 }
 
 void UpstreamRequest::resetStream() {
@@ -599,8 +621,6 @@ void UpstreamRequest::onPoolReady(std::unique_ptr<GenericUpstream>&& upstream,
 
   host->outlierDetector().putResult(Upstream::Outlier::Result::LocalOriginConnectSuccess);
 
-  onUpstreamHostSelected(host, true);
-
   if (protocol) {
     stream_info_.protocol(protocol.value());
   } else {
@@ -631,6 +651,11 @@ void UpstreamRequest::onPoolReady(std::unique_ptr<GenericUpstream>&& upstream,
   upstream_info.setUpstreamRemoteAddress(address_provider.remoteAddress());
   upstream_info.setUpstreamSslConnection(info.downstreamAddressProvider().sslConnection());
 
+  // Invoke the onUpstreamHostSelected after setting ssl_connection_info_ in upstream_info.
+  // This is because the onUpstreamHostSelected callback may need to access the ssl_connection_info
+  // to determine the scheme of the upstream connection.
+  onUpstreamHostSelected(host, true);
+
   if (info.downstreamAddressProvider().connectionID().has_value()) {
     upstream_info.setUpstreamConnectionId(info.downstreamAddressProvider().connectionID().value());
   }
@@ -647,7 +672,7 @@ void UpstreamRequest::onPoolReady(std::unique_ptr<GenericUpstream>&& upstream,
     upstream_info.setUpstreamProtocol(protocol.value());
   }
 
-  if (parent_.downstreamEndStream()) {
+  if (parent_.downstreamEndStream() && !per_try_timeout_) {
     setupPerTryTimeout();
   } else {
     create_per_try_timeout_on_request_complete_ = true;
@@ -661,9 +686,15 @@ void UpstreamRequest::onPoolReady(std::unique_ptr<GenericUpstream>&& upstream,
   absl::optional<std::chrono::milliseconds> max_stream_duration;
   if (parent_.dynamicMaxStreamDuration().has_value()) {
     max_stream_duration = parent_.dynamicMaxStreamDuration().value();
-  } else if (upstream_host_->cluster().commonHttpProtocolOptions().has_max_stream_duration()) {
-    max_stream_duration = std::chrono::milliseconds(DurationUtil::durationToMilliseconds(
-        upstream_host_->cluster().commonHttpProtocolOptions().max_stream_duration()));
+  } else if (upstream_host_->cluster()
+                 .httpProtocolOptions()
+                 .commonHttpProtocolOptions()
+                 .has_max_stream_duration()) {
+    max_stream_duration = std::chrono::milliseconds(
+        DurationUtil::durationToMilliseconds(upstream_host_->cluster()
+                                                 .httpProtocolOptions()
+                                                 .commonHttpProtocolOptions()
+                                                 .max_stream_duration()));
   }
   if (max_stream_duration.has_value() && max_stream_duration->count()) {
     max_stream_duration_timer_ = parent_.callbacks()->dispatcher().createTimer(
@@ -674,7 +705,8 @@ void UpstreamRequest::onPoolReady(std::unique_ptr<GenericUpstream>&& upstream,
   const auto* route_entry = route().routeEntry();
   if (route_entry->autoHostRewrite() && !host->hostname().empty()) {
     Http::Utility::updateAuthority(*parent_.downstreamHeaders(), host->hostname(),
-                                   route_entry->appendXfh());
+                                   route_entry->appendXfh(),
+                                   !parent_.config().suppress_envoy_headers_);
   }
 
   stream_info_.setRequestHeaders(*parent_.downstreamHeaders());
@@ -797,12 +829,7 @@ void UpstreamRequestFilterManagerCallbacks::resetStream(
   // which should force reset the stream, and a codec driven reset, which should
   // tell the router the stream reset, and let the router make the decision to
   // send a local reply, or retry the stream.
-  bool is_codec_error;
-  if (Runtime::runtimeFeatureEnabled("envoy.reloadable_features.report_stream_reset_error_code")) {
-    is_codec_error = absl::StrContains(transport_failure_reason, "codec_error");
-  } else {
-    is_codec_error = transport_failure_reason == "codec_error";
-  }
+  bool is_codec_error = absl::StrContains(transport_failure_reason, "codec_error");
   if (reset_reason == Http::StreamResetReason::LocalReset && !is_codec_error) {
     upstream_request_.parent_.callbacks()->resetStream();
     return;
@@ -817,6 +844,28 @@ Upstream::ClusterInfoConstSharedPtr UpstreamRequestFilterManagerCallbacks::clust
 Http::Http1StreamEncoderOptionsOptRef
 UpstreamRequestFilterManagerCallbacks::http1StreamEncoderOptions() {
   return upstream_request_.parent_.callbacks()->http1StreamEncoderOptions();
+}
+
+void UpstreamRequestFilterManagerCallbacks::disableRouteTimeoutForWebsocketUpgrade() {
+  upstream_request_.parent_.disableRouteTimeoutForWebsocketUpgrade();
+}
+
+void UpstreamRequestFilterManagerCallbacks::disablePerTryTimeoutForWebsocketUpgrade() {
+  // Disable the per-try timeout and idle timeout timers once websocket upgrade succeeds.
+  // This mirrors the behavior for route timeout disabling in upgrades.
+  upstream_request_.disablePerTryTimeoutForWebsocketUpgrade();
+}
+
+void UpstreamRequest::disablePerTryTimeoutForWebsocketUpgrade() {
+  // Disable and clear per-try timers so they do not fire after websocket upgrade.
+  if (per_try_timeout_ != nullptr) {
+    per_try_timeout_->disableTimer();
+    per_try_timeout_.reset();
+  }
+  if (per_try_idle_timeout_ != nullptr) {
+    per_try_idle_timeout_->disableTimer();
+    per_try_idle_timeout_.reset();
+  }
 }
 
 } // namespace Router

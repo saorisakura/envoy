@@ -1,5 +1,6 @@
 # DO NOT LOAD THIS FILE. Load envoy_build_system.bzl instead.
 # Envoy library targets
+load("@rules_cc//cc:defs.bzl", "cc_library")
 load(
     ":envoy_internal.bzl",
     "envoy_copts",
@@ -27,11 +28,11 @@ def envoy_pch_library(
         name,
         includes,
         deps,
-        external_deps,
         visibility,
+        external_deps = [],
         testonly = False,
         repository = ""):
-    native.cc_library(
+    cc_library(
         name = name + "_libs",
         visibility = ["//visibility:private"],
         copts = envoy_copts(repository),

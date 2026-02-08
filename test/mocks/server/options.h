@@ -27,6 +27,7 @@ public:
   MOCK_METHOD(bool, allowUnknownStaticFields, (), (const));
   MOCK_METHOD(bool, rejectUnknownDynamicFields, (), (const));
   MOCK_METHOD(bool, ignoreUnknownDynamicFields, (), (const));
+  MOCK_METHOD(bool, skipDeprecatedLogs, (), (const));
   MOCK_METHOD(const std::string&, adminAddressPath, (), (const));
   MOCK_METHOD(Network::Address::IpVersion, localAddressIpVersion, (), (const));
   MOCK_METHOD(std::chrono::seconds, drainTime, (), (const));
@@ -42,6 +43,7 @@ public:
   MOCK_METHOD(const std::string&, logPath, (), (const));
   MOCK_METHOD(uint64_t, restartEpoch, (), (const));
   MOCK_METHOD(std::chrono::milliseconds, fileFlushIntervalMsec, (), (const));
+  MOCK_METHOD(uint64_t, fileFlushMinSizeKB, (), (const));
   MOCK_METHOD(Mode, mode, (), (const));
   MOCK_METHOD(const std::string&, serviceClusterName, (), (const));
   MOCK_METHOD(const std::string&, serviceNodeName, (), (const));

@@ -12,8 +12,10 @@ envoy_cc_mock(
     name = "router_mocks",
     srcs = ["mocks.cc"],
     hdrs = ["mocks.h"],
+    rbe_pool = "6gig",
     deps = [
         "//envoy/event:dispatcher_interface",
+        "//envoy/formatter:substitution_formatter_interface",
         "//envoy/http:stateful_session_interface",
         "//envoy/json:json_object_interface",
         "//envoy/local_info:local_info_interface",
@@ -28,6 +30,7 @@ envoy_cc_mock(
         "//envoy/stream_info:stream_info_interface",
         "//envoy/thread_local:thread_local_interface",
         "//envoy/upstream:cluster_manager_interface",
+        "//source/common/router:upstream_to_downstream_impl_base",
         "//test/mocks:common_lib",
         "//test/mocks/stats:stats_mocks",
         "//test/mocks/upstream:host_mocks",
@@ -42,6 +45,7 @@ envoy_cc_mock(
     name = "router_filter_interface",
     srcs = ["router_filter_interface.cc"],
     hdrs = ["router_filter_interface.h"],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/router:router_lib",
         "//test/mocks/http:http_mocks",

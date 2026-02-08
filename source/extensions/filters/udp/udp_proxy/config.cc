@@ -8,6 +8,9 @@ namespace Extensions {
 namespace UdpFilters {
 namespace UdpProxy {
 
+using ConfigTypeCase =
+    envoy::extensions::filters::udp::udp_proxy::v3::UdpProxyConfig::SessionFilter::ConfigTypeCase;
+
 constexpr uint32_t DefaultMaxConnectAttempts = 1;
 constexpr uint32_t DefaultMaxBufferedDatagrams = 1024;
 constexpr uint64_t DefaultMaxBufferedBytes = 16384;
@@ -58,8 +61,10 @@ TunnelingConfigImpl::TunnelingConfigImpl(const TunnelingConfig& config,
   envoy::config::core::v3::SubstitutionFormatString proxy_substitution_format_config;
   proxy_substitution_format_config.mutable_text_format_source()->set_inline_string(
       config.proxy_host());
-  proxy_host_formatter_ = Formatter::SubstitutionFormatStringUtils::fromProtoConfig(
-      proxy_substitution_format_config, context);
+  proxy_host_formatter_ =
+      THROW_OR_RETURN_VALUE(Formatter::SubstitutionFormatStringUtils::fromProtoConfig(
+                                proxy_substitution_format_config, context),
+                            Formatter::FormatterPtr);
 
   if (config.has_proxy_port()) {
     uint32_t port = config.proxy_port().value();
@@ -73,8 +78,25 @@ TunnelingConfigImpl::TunnelingConfigImpl(const TunnelingConfig& config,
   envoy::config::core::v3::SubstitutionFormatString target_substitution_format_config;
   target_substitution_format_config.mutable_text_format_source()->set_inline_string(
       config.target_host());
-  target_host_formatter_ = Formatter::SubstitutionFormatStringUtils::fromProtoConfig(
-      target_substitution_format_config, context);
+  target_host_formatter_ =
+      THROW_OR_RETURN_VALUE(Formatter::SubstitutionFormatStringUtils::fromProtoConfig(
+                                target_substitution_format_config, context),
+                            Formatter::FormatterPtr);
+
+  if (config.has_retry_options() && config.retry_options().has_backoff_options()) {
+    const uint64_t base_interval_ms =
+        PROTOBUF_GET_MS_REQUIRED(config.retry_options().backoff_options(), base_interval);
+    const uint64_t max_interval_ms = PROTOBUF_GET_MS_OR_DEFAULT(
+        config.retry_options().backoff_options(), max_interval, base_interval_ms * 10);
+
+    if (max_interval_ms < base_interval_ms) {
+      throw EnvoyException(
+          "max_backoff_interval must be greater or equal to base_backoff_interval");
+    }
+
+    backoff_strategy_ = std::make_unique<JitteredExponentialBackOffStrategy>(
+        base_interval_ms, max_interval_ms, context.serverFactoryContext().api().randomGenerator());
+  }
 }
 
 UdpProxyFilterConfigImpl::UdpProxyFilterConfigImpl(
@@ -143,6 +165,16 @@ UdpProxyFilterConfigImpl::UdpProxyFilterConfigImpl(
 
   for (const auto& filter : config.session_filters()) {
     ENVOY_LOG(debug, "    UDP session filter #{}", filter_factories_.size());
+
+    if (filter.config_type_case() == ConfigTypeCase::kConfigDiscovery) {
+      ENVOY_LOG(debug, "      dynamic filter name: {}", filter.name());
+      filter_factories_.push_back(
+          udp_session_filter_config_provider_manager_->createDynamicFilterConfigProvider(
+              filter.config_discovery(), filter.name(), context.serverFactoryContext(), context,
+              context.serverFactoryContext().clusterManager(), false, "udp_session", nullptr));
+      continue;
+    }
+
     ENVOY_LOG(debug, "      name: {}", filter.name());
     ENVOY_LOG(debug, "    config: {}",
               MessageUtil::getJsonStringFromMessageOrError(

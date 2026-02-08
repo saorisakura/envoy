@@ -21,7 +21,17 @@ Http::FilterFactoryCb CsrfFilterFactory::createFilterFactoryFromProtoTyped(
   };
 }
 
-Router::RouteSpecificFilterConfigConstSharedPtr
+Http::FilterFactoryCb CsrfFilterFactory::createFilterFactoryFromProtoWithServerContextTyped(
+    const envoy::extensions::filters::http::csrf::v3::CsrfPolicy& policy,
+    const std::string& stats_prefix, Server::Configuration::ServerFactoryContext& context) {
+  CsrfFilterConfigSharedPtr config =
+      std::make_shared<CsrfFilterConfig>(policy, stats_prefix, context.scope(), context);
+  return [config](Http::FilterChainFactoryCallbacks& callbacks) -> void {
+    callbacks.addStreamDecoderFilter(std::make_shared<CsrfFilter>(config));
+  };
+}
+
+absl::StatusOr<Router::RouteSpecificFilterConfigConstSharedPtr>
 CsrfFilterFactory::createRouteSpecificFilterConfigTyped(
     const envoy::extensions::filters::http::csrf::v3::CsrfPolicy& policy,
     Server::Configuration::ServerFactoryContext& context, ProtobufMessage::ValidationVisitor&) {

@@ -176,8 +176,11 @@ public:
   const LowerCaseString EnvoyOriginalDstHost{absl::StrCat(prefix(), "-original-dst-host")};
   const LowerCaseString EnvoyOriginalMethod{absl::StrCat(prefix(), "-original-method")};
   const LowerCaseString EnvoyOriginalPath{absl::StrCat(prefix(), "-original-path")};
+  const LowerCaseString EnvoyOriginalHost{absl::StrCat(prefix(), "-original-host")};
   const LowerCaseString EnvoyOverloaded{absl::StrCat(prefix(), "-overloaded")};
   const LowerCaseString EnvoyDropOverload{absl::StrCat(prefix(), "-drop-overload")};
+  const LowerCaseString EnvoyUnconditionalDropOverload{
+      absl::StrCat(prefix(), "-unconditional-drop-overload")};
   const LowerCaseString EnvoyRateLimited{absl::StrCat(prefix(), "-ratelimited")};
   const LowerCaseString EnvoyRetryOn{absl::StrCat(prefix(), "-retry-on")};
   const LowerCaseString EnvoyRetryGrpcOn{absl::StrCat(prefix(), "-retry-grpc-on")};
@@ -203,6 +206,7 @@ public:
   const LowerCaseString EnvoyUpstreamStreamDurationMs{
       absl::StrCat(prefix(), "-upstream-stream-duration-ms")};
   const LowerCaseString EnvoyDecoratorOperation{absl::StrCat(prefix(), "-decorator-operation")};
+  const LowerCaseString EnvoyCompressionStatus{absl::StrCat(prefix(), "-compression-status")};
   const LowerCaseString Expect{"expect"};
   const LowerCaseString ForwardedClientCert{"x-forwarded-client-cert"};
   const LowerCaseString ForwardedFor{"x-forwarded-for"};
@@ -236,7 +240,6 @@ public:
   const LowerCaseString Via{"via"};
   const LowerCaseString WWWAuthenticate{"www-authenticate"};
   const LowerCaseString XContentTypeOptions{"x-content-type-options"};
-  const LowerCaseString XSquashDebug{"x-squash-debug"};
   const LowerCaseString EarlyData{"early-data"};
 
   struct {
@@ -285,6 +288,10 @@ public:
   struct {
     const std::string True{"true"};
   } EnvoyDropOverloadValues;
+
+  struct {
+    const std::string True{"true"};
+  } EnvoyUnconditionalDropOverloadValues;
 
   struct {
     const std::string True{"true"};
@@ -350,6 +357,7 @@ public:
 
   struct {
     const std::string EnvoyHealthChecker{"Envoy/HC"};
+    const std::string GoBrowser{"Go-browser"};
   } UserAgentValues;
 
   struct {
@@ -366,6 +374,17 @@ public:
     const std::string Http2String{"HTTP/2"};
     const std::string Http3String{"HTTP/3"};
   } ProtocolStrings;
+
+  struct {
+    const std::string ContentLengthTooSmall{"ContentLengthTooSmall"};
+    const std::string ContentTypeNotAllowed{"ContentTypeNotAllowed"};
+    const std::string EtagNotAllowed{"EtagNotAllowed"};
+    const std::string StatusCodeNotAllowed{"StatusCodeNotAllowed"};
+    const std::string Compressed{"Compressed"};
+    const std::string OriginalLengthPrefix{"OriginalLength="};
+    const std::string Separator{";"};
+    const std::string ValueSeparator{","};
+  } EnvoyCompressionStatusValues;
 };
 
 using Headers = ConstSingleton<HeaderValues>;

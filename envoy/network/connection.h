@@ -78,12 +78,27 @@ enum class ConnectionCloseType {
 };
 
 /**
- * Type of connection close which is detected from the socket.
+ * Combines connection event and close type for connection close operations
  */
-enum class DetectedCloseType {
-  Normal,      // The normal socket close from Envoy's connection perspective.
-  LocalReset,  // The local reset initiated from Envoy.
-  RemoteReset, // The peer reset detected by the connection.
+struct ConnectionCloseAction {
+  ConnectionEvent event_;
+  bool close_socket_;
+  ConnectionCloseType type_;
+
+  ConnectionCloseAction(ConnectionEvent event_type = ConnectionEvent::Connected,
+                        bool close_socket = false,
+                        ConnectionCloseType close_type = ConnectionCloseType::NoFlush)
+      : event_(event_type), close_socket_(close_socket), type_(close_type) {}
+
+  bool operator==(const ConnectionCloseAction& other) const {
+    return event_ == other.event_ && type_ == other.type_ && close_socket_ == other.close_socket_;
+  }
+
+  bool operator!=(const ConnectionCloseAction& other) const { return !(*this == other); }
+
+  bool closeSocket() const { return close_socket_; }
+  bool isLocalClose() const { return event_ == ConnectionEvent::LocalClose; }
+  bool isRemoteClose() const { return event_ == ConnectionEvent::RemoteClose; }
 };
 
 /**
@@ -167,7 +182,7 @@ public:
   /**
    * @return the detected close type from socket.
    */
-  virtual DetectedCloseType detectedCloseType() const PURE;
+  virtual StreamInfo::DetectedCloseType detectedCloseType() const PURE;
 
   /**
    * @return Event::Dispatcher& the dispatcher backing this connection.
@@ -319,10 +334,21 @@ public:
   virtual bool aboveHighWatermark() const PURE;
 
   /**
+   * @return const ConnectionSocketPtr& reference to the socket from current connection.
+   */
+  virtual const ConnectionSocketPtr& getSocket() const PURE;
+
+  /**
    * Get the socket options set on this connection.
    */
   virtual const ConnectionSocket::OptionsSharedPtr& socketOptions() const PURE;
 
+  /**
+   * Set a socket option on the underlying socket(s) of this connection.
+   * @param option The socket option to set.
+   * @return boolean telling if the socket option was set successfully.
+   */
+  virtual bool setSocketOption(Network::SocketOptionName name, absl::Span<uint8_t> value) PURE;
   /**
    * The StreamInfo object associated with this connection. This is typically
    * used for logging purposes. Individual filters may add specific information

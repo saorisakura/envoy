@@ -38,6 +38,11 @@ struct ClientSslTransportOptions {
     return *this;
   }
 
+  ClientSslTransportOptions& setCurves(const std::vector<std::string>& curves) {
+    curves_ = curves;
+    return *this;
+  }
+
   ClientSslTransportOptions& setSni(absl::string_view sni) {
     sni_ = std::string(sni);
     return *this;
@@ -70,18 +75,22 @@ struct ClientSslTransportOptions {
   std::vector<std::string> cipher_suites_{};
   std::string san_;
   std::vector<std::string> sigalgs_;
+  std::vector<std::string> curves_;
   std::string sni_;
   envoy::extensions::transport_sockets::tls::v3::TlsParameters::TlsProtocol tls_version_{
       envoy::extensions::transport_sockets::tls::v3::TlsParameters::TLS_AUTO};
   bool use_expired_spiffe_cert_{false};
   bool client_with_intermediate_cert_{false};
+  bool no_cert_{false};
   // It is owned by the caller that invokes `setCustomCertValidatorConfig()`.
   envoy::config::core::v3::TypedExtensionConfig* custom_validator_config_{nullptr};
 };
 
 void initializeUpstreamTlsContextConfig(
     const ClientSslTransportOptions& options,
-    envoy::extensions::transport_sockets::tls::v3::UpstreamTlsContext& tls_context);
+    envoy::extensions::transport_sockets::tls::v3::UpstreamTlsContext& tls_context,
+    // By default, clients connect to Envoy. Allow configuring to connect to upstreams.
+    bool connect_to_upstream = false);
 
 Network::UpstreamTransportSocketFactoryPtr
 createClientSslTransportSocketFactory(const ClientSslTransportOptions& options,

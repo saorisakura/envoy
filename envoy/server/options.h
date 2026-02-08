@@ -155,6 +155,11 @@ public:
   virtual bool ignoreUnknownDynamicFields() const PURE;
 
   /**
+   * @return bool skip deprecated warning log messages?
+   **/
+  virtual bool skipDeprecatedLogs() const PURE;
+
+  /**
    * @return const std::string& the admin address output file.
    */
   virtual const std::string& adminAddressPath() const PURE;
@@ -216,6 +221,11 @@ public:
    * @return std::chrono::milliseconds the duration in msec between log flushes.
    */
   virtual std::chrono::milliseconds fileFlushIntervalMsec() const PURE;
+
+  /**
+   * @return uint64_t the minimum size in kilobytes before the log buffer is flushed.
+   */
+  virtual uint64_t fileFlushMinSizeKB() const PURE;
 
   /**
    * @return const std::string& the server's cluster.

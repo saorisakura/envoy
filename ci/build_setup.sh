@@ -11,8 +11,6 @@ if [[ -n "$NO_BUILD_SETUP" ]]; then
     return
 fi
 
-CURRENT_SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
-
 export PPROF_PATH=/thirdparty_build/bin/pprof
 
 if [[ -z "${NUM_CPUS}" ]]; then
@@ -32,8 +30,6 @@ fi
     ENVOY_BUILD_ARCH=$(uname -m)
     export ENVOY_BUILD_ARCH
 }
-
-export ENVOY_BUILD_FILTER_EXAMPLE="${ENVOY_BUILD_FILTER_EXAMPLE:-0}"
 
 read -ra BAZEL_BUILD_EXTRA_OPTIONS <<< "${BAZEL_BUILD_EXTRA_OPTIONS:-}"
 read -ra BAZEL_EXTRA_TEST_OPTIONS <<< "${BAZEL_EXTRA_TEST_OPTIONS:-}"
@@ -56,17 +52,20 @@ export BUILD_DIR
 
 # Environment setup.
 export ENVOY_TEST_TMPDIR="${ENVOY_TEST_TMPDIR:-$BUILD_DIR/tmp}"
-export LLVM_ROOT="${LLVM_ROOT:-/opt/llvm}"
-export PATH=${LLVM_ROOT}/bin:${PATH}
 
 if [[ -f "/etc/redhat-release" ]]; then
   BAZEL_BUILD_EXTRA_OPTIONS+=("--copt=-DENVOY_IGNORE_GLIBCXX_USE_CXX11_ABI_ERROR=1")
 fi
 
 function cleanup() {
-  # Remove build artifacts. This doesn't mess with incremental builds as these
-  # are just symlinks.
-  rm -rf "${ENVOY_SRCDIR}"/bazel-* clang.bazelrc
+    if [[ "${ENVOY_BUILD_SKIP_CLEANUP}" == "true" ]]; then
+        echo "Skipping cleanup as requested."
+        return
+    fi
+
+    # Remove build artifacts. This doesn't mess with incremental builds as these
+    # are just symlinks.
+    rm -rf "${ENVOY_SRCDIR}"/bazel-* clang.bazelrc
 }
 
 cleanup
@@ -75,10 +74,27 @@ trap cleanup EXIT
 # NB: do not use bazel before here to ensure correct directories.
 _bazel="$(which bazel)"
 
+# Use separate output_base for separate workspaces/mods
+case $CI_TARGET in
+    config|docs|verify_examples)
+        ENVOY_OUTPUT_BASE_DIR="${ENVOY_OUTPUT_BASE_DIR:-docs}"
+        # workaround rules_rust bug
+        export CARGO_BAZEL_REPIN=true
+        ;;
+    external)
+        ENVOY_OUTPUT_BASE_DIR="${ENVOY_OUTPUT_BASE_DIR:-external}"
+        # workaround rules_rust bug
+        export CARGO_BAZEL_REPIN=true
+        ;;
+    *)
+        ENVOY_OUTPUT_BASE_DIR="${ENVOY_OUTPUT_BASE_DIR:-base}"
+        ;;
+esac
+
 BAZEL_STARTUP_OPTIONS=(
     "${BAZEL_STARTUP_EXTRA_OPTIONS[@]}"
     "--output_user_root=${BUILD_DIR}/bazel_root"
-    "--output_base=${BUILD_DIR}/bazel_root/base")
+    "--output_base=${BUILD_DIR}/bazel_root/${ENVOY_OUTPUT_BASE_DIR}")
 
 bazel () {
     local startup_options
@@ -119,12 +135,6 @@ export BAZEL_STARTUP_OPTION_LIST
 export BAZEL_BUILD_OPTION_LIST
 export BAZEL_GLOBAL_OPTION_LIST
 
-if [[ -e "${LLVM_ROOT}" ]]; then
-    "${CURRENT_SCRIPT_DIR}/../bazel/setup_clang.sh" "${LLVM_ROOT}"
-else
-    echo "LLVM_ROOT not found, not setting up llvm."
-fi
-
 [[ "${BAZEL_EXPUNGE}" == "1" ]] && bazel clean "${BAZEL_BUILD_OPTIONS[@]}" --expunge
 
 if [[ "${ENVOY_BUILD_ARCH}" == "x86_64" ]]; then
@@ -154,12 +164,5 @@ mkdir -p "${ENVOY_FAILED_TEST_LOGS}"
 # This is where we copy the build profile to.
 export ENVOY_BUILD_PROFILE="${ENVOY_BUILD_DIR}"/generated/build-profile
 mkdir -p "${ENVOY_BUILD_PROFILE}"
-
-if [[ "${ENVOY_BUILD_FILTER_EXAMPLE}" == "true" ]]; then
-  # shellcheck source=ci/filter_example_setup.sh
-  . "${CURRENT_SCRIPT_DIR}"/filter_example_setup.sh
-else
-  echo "Skip setting up Envoy Filter Example."
-fi
 
 export NO_BUILD_SETUP=1

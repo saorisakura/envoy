@@ -82,7 +82,7 @@ template <class T> static void initializeMockConnection(T& connection) {
   ON_CALL(connection, close(_))
       .WillByDefault(Invoke([&connection](ConnectionCloseType type) -> void {
         if (type == ConnectionCloseType::AbortReset) {
-          connection.detected_close_type_ = DetectedCloseType::LocalReset;
+          connection.detected_close_type_ = StreamInfo::DetectedCloseType::LocalReset;
         }
         connection.raiseEvent(Network::ConnectionEvent::LocalClose);
       }));
@@ -150,6 +150,8 @@ MockFilterManagerConnection::MockFilterManagerConnection() {
   ON_CALL(*this, rawWrite(_, _)).WillByDefault(Invoke([](Buffer::Instance& buffer, bool) -> void {
     buffer.drain(buffer.length());
   }));
+
+  ON_CALL(*this, closeConnection(_)).WillByDefault(Invoke([]() -> void {}));
 }
 MockFilterManagerConnection::~MockFilterManagerConnection() = default;
 

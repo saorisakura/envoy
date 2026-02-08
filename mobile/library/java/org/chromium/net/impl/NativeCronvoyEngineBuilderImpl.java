@@ -4,6 +4,7 @@ import static io.envoyproxy.envoymobile.engine.EnvoyConfiguration.TrustChainVeri
 
 import java.nio.charset.StandardCharsets;
 import android.content.Context;
+import android.util.Pair;
 import androidx.annotation.VisibleForTesting;
 import com.google.protobuf.Struct;
 import io.envoyproxy.envoymobile.engine.AndroidEngineImpl;
@@ -37,8 +38,10 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
   // TODO(refactor) move unshared variables into their specific methods.
   private final List<EnvoyNativeFilterConfig> nativeFilterChain = new ArrayList<>();
   private final EnvoyEventTracker mEnvoyEventTracker = null;
-  private final int mConnectTimeoutSeconds = 30;
+  private int mConnectTimeoutSeconds = 10;
   private final int mDnsRefreshSeconds = 60;
+  private boolean mDisableDnsRefreshOnFailure = false;
+  private boolean mDisableDnsRefreshOnNetworkChange = false;
   private final int mDnsFailureRefreshSecondsBase = 2;
   private final int mDnsFailureRefreshSecondsMax = 10;
   private int mDnsQueryTimeoutSeconds = 5;
@@ -49,9 +52,6 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
   private Optional<Integer> mDnsNumRetries = Optional.empty();
   private final List<String> mDnsFallbackNameservers = Collections.emptyList();
   private final boolean mEnableDnsFilterUnroutableFamilies = true;
-  private boolean mUseCares = false;
-  private boolean mForceV6 = true;
-  private boolean mUseGro = false;
   private boolean mEnableDrainPostDnsRefresh = false;
   private final boolean mEnableGzipDecompression = true;
   private final boolean mEnableSocketTag = true;
@@ -67,6 +67,14 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
   private TrustChainVerification mTrustChainVerification = VERIFY_TRUST_CHAIN;
   private final boolean mEnablePlatformCertificatesValidation = true;
   private String mUpstreamTlsSni = "";
+  private int mH3ConnectionKeepaliveInitialIntervalMilliseconds = 0;
+  private boolean mUseQuicPlatformPacketWriter = false;
+  private boolean mEnableQuicConnectionMigration = false;
+  private boolean mMigrateIdleQuicConnection = false;
+  private long mMaxIdleTimeBeforeQuicMigrationSeconds = 0;
+  private long mMaxTimeOnNonDefaultNetworkSeconds = 0;
+  private boolean mUseNetworkChangeEvent = false;
+  private boolean mUseV2NetworkMonitor = false;
 
   private final Map<String, Boolean> mRuntimeGuards = new HashMap<>();
 
@@ -85,37 +93,6 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
    */
   public NativeCronvoyEngineBuilderImpl setEnableDrainPostDnsRefresh(boolean enable) {
     mEnableDrainPostDnsRefresh = enable;
-    return this;
-  }
-
-  /**
-   * Enable using the c_ares DNS resolver.
-   *
-   * @param enable If true, use c_ares.
-   */
-  public NativeCronvoyEngineBuilderImpl setUseCares(boolean enable) {
-    mUseCares = enable;
-    return this;
-  }
-
-  /**
-   * Set whether to map v4 address to v6.
-   *
-   * @param enable If true, map v4 address to v6.
-   */
-  public NativeCronvoyEngineBuilderImpl setForceV6(boolean enable) {
-    mForceV6 = enable;
-    return this;
-  }
-
-  /**
-   * Specify whether to use UDP GRO for upstream QUIC/HTTP3 sockets, if GRO is available on the
-   * system.
-   *
-   * @param enable If true, use UDP GRO.
-   */
-  public NativeCronvoyEngineBuilderImpl setUseGro(boolean enable) {
-    mUseGro = enable;
     return this;
   }
 
@@ -139,6 +116,34 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
    */
   public NativeCronvoyEngineBuilderImpl setEnableProxying(boolean enable) {
     mEnableProxying = enable;
+    return this;
+  }
+
+  /**
+   * Use a more modern network change API.
+   *
+   * @param enable If true, use the new API; otherwise, don't.
+   */
+  public NativeCronvoyEngineBuilderImpl setUseNetworkChangeEvent(boolean use) {
+    mUseNetworkChangeEvent = use;
+    return this;
+  }
+
+  /** Disables the DNS refresh on failure. */
+  public NativeCronvoyEngineBuilderImpl
+  setDisableDnsRefreshOnFailure(boolean disableDnsRefreshOnFailure) {
+    mDisableDnsRefreshOnFailure = disableDnsRefreshOnFailure;
+    return this;
+  }
+
+  public NativeCronvoyEngineBuilderImpl
+  setDisableDnsRefreshOnNetworkChange(boolean disableDnsRefreshOnNetworkChange) {
+    mDisableDnsRefreshOnNetworkChange = disableDnsRefreshOnNetworkChange;
+    return this;
+  }
+
+  public NativeCronvoyEngineBuilderImpl setUseV2NetworkMonitor(boolean useV2NetworkMonitor) {
+    mUseV2NetworkMonitor = useV2NetworkMonitor;
     return this;
   }
 
@@ -221,6 +226,65 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
     return this;
   }
 
+  public NativeCronvoyEngineBuilderImpl
+  setH3ConnectionKeepaliveInitialIntervalMilliseconds(int interval) {
+    mH3ConnectionKeepaliveInitialIntervalMilliseconds = interval;
+    return this;
+  }
+
+  /**
+   * Set whether to use a platform specific APIs to create UDP socket and the associated QUIC packet
+   * writer. Note that `setUseV2NetworkMonitor()` also needs to be called to take effect. This is a
+   * temporary API which will be deprecated once the platform specific extension is verified to work
+   * and will be used as the default.
+   */
+  public NativeCronvoyEngineBuilderImpl setUseQuicPlatformPacketWriter(boolean use) {
+    mUseQuicPlatformPacketWriter = use;
+    return this;
+  }
+
+  /**
+   * Set whether to enable QUIC connection migration across different network interfaces.
+   * Note that `setUseV2NetworkMonitor()` also needs to be called to take effect.
+   * If enabled, the engine will automatically be configured to use platform packet writer. *
+   */
+  public NativeCronvoyEngineBuilderImpl setEnableQuicConnectionMigration(boolean enable) {
+    mEnableQuicConnectionMigration = enable;
+    return this;
+  }
+
+  /**
+   * Set whether to migrate idle QUIC connections to a different network upon network events.
+   * If not, the connection might be closed or drained or ignore the network event depends on the
+   * event type.
+   */
+  public NativeCronvoyEngineBuilderImpl setMigrateIdleQuicConnection(boolean migrate) {
+    mMigrateIdleQuicConnection = migrate;
+    return this;
+  }
+
+  /**
+   * Set the maximum idle time allowed for a QUIC connection before migration.
+   */
+  public NativeCronvoyEngineBuilderImpl setMaxIdleTimeBeforeQuicMigrationSeconds(long seconds) {
+    mMaxIdleTimeBeforeQuicMigrationSeconds = seconds;
+    return this;
+  }
+
+  /**
+   * Set the maximum time a QUIC connection can remain on a non-default network before switching to
+   * the default one.
+   */
+  public NativeCronvoyEngineBuilderImpl setMaxTimeOnNonDefaultNetworkSeconds(long seconds) {
+    mMaxTimeOnNonDefaultNetworkSeconds = seconds;
+    return this;
+  }
+
+  public NativeCronvoyEngineBuilderImpl setConnectTimeoutSeconds(int connectTimeout) {
+    mConnectTimeoutSeconds = connectTimeout;
+    return this;
+  }
+
   /**
    * Indicates to skip the TLS certificate verification.
    *
@@ -260,9 +324,9 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
 
   EnvoyEngine createEngine(EnvoyOnEngineRunning onEngineRunning, EnvoyLogger envoyLogger,
                            String logLevel) {
-    AndroidEngineImpl engine = new AndroidEngineImpl(getContext(), onEngineRunning, envoyLogger,
-                                                     mEnvoyEventTracker, mEnableProxying);
-    AndroidNetworkMonitor.load(getContext(), engine);
+    AndroidEngineImpl engine = new AndroidEngineImpl(
+        getContext(), onEngineRunning, envoyLogger, mEnvoyEventTracker, mEnableProxying,
+        mUseNetworkChangeEvent, mDisableDnsRefreshOnNetworkChange, mUseV2NetworkMonitor);
     engine.runWithConfig(createEnvoyConfiguration(), logLevel);
     return engine;
   }
@@ -273,16 +337,20 @@ public class NativeCronvoyEngineBuilderImpl extends CronvoyEngineBuilderImpl {
     Map<String, EnvoyKeyValueStore> keyValueStores = Collections.emptyMap();
 
     return new EnvoyConfiguration(
-        mConnectTimeoutSeconds, mDnsRefreshSeconds, mDnsFailureRefreshSecondsBase,
-        mDnsFailureRefreshSecondsMax, mDnsQueryTimeoutSeconds, mDnsMinRefreshSeconds,
-        mDnsPreresolveHostnames, mEnableDNSCache, mDnsCacheSaveIntervalSeconds,
-        mDnsNumRetries.orElse(-1), mEnableDrainPostDnsRefresh, quicEnabled(), mUseCares, mForceV6,
-        mUseGro, quicConnectionOptions(), quicClientConnectionOptions(), quicHints(),
-        quicCanonicalSuffixes(), mEnableGzipDecompression, brotliEnabled(), portMigrationEnabled(),
-        mEnableSocketTag, mEnableInterfaceBinding, mH2ConnectionKeepaliveIdleIntervalMilliseconds,
-        mH2ConnectionKeepaliveTimeoutSeconds, mMaxConnectionsPerHost, mStreamIdleTimeoutSeconds,
-        mPerTryIdleTimeoutSeconds, mAppVersion, mAppId, mTrustChainVerification, nativeFilterChain,
-        platformFilterChain, stringAccessors, keyValueStores, mRuntimeGuards,
-        mEnablePlatformCertificatesValidation, mUpstreamTlsSni);
+        mConnectTimeoutSeconds, mDisableDnsRefreshOnFailure, mDisableDnsRefreshOnNetworkChange,
+        mDnsRefreshSeconds, mDnsFailureRefreshSecondsBase, mDnsFailureRefreshSecondsMax,
+        mDnsQueryTimeoutSeconds, mDnsMinRefreshSeconds, mDnsPreresolveHostnames, mEnableDNSCache,
+        mDnsCacheSaveIntervalSeconds, mDnsNumRetries.orElse(-1), mEnableDrainPostDnsRefresh,
+        quicEnabled(), quicConnectionOptions(), quicClientConnectionOptions(), quicHints(),
+        quicCanonicalSuffixes(), mEnableGzipDecompression, brotliEnabled(),
+        numTimeoutsToTriggerPortMigration(), mEnableSocketTag, mEnableInterfaceBinding,
+        mH2ConnectionKeepaliveIdleIntervalMilliseconds, mH2ConnectionKeepaliveTimeoutSeconds,
+        mMaxConnectionsPerHost, mStreamIdleTimeoutSeconds, mPerTryIdleTimeoutSeconds, mAppVersion,
+        mAppId, mTrustChainVerification, nativeFilterChain, platformFilterChain, stringAccessors,
+        keyValueStores, mRuntimeGuards, mEnablePlatformCertificatesValidation, mUpstreamTlsSni,
+        mH3ConnectionKeepaliveInitialIntervalMilliseconds,
+        mUseQuicPlatformPacketWriter && mUseV2NetworkMonitor,
+        mEnableQuicConnectionMigration && mUseV2NetworkMonitor, mMigrateIdleQuicConnection,
+        mMaxIdleTimeBeforeQuicMigrationSeconds, mMaxTimeOnNonDefaultNetworkSeconds);
   }
 }

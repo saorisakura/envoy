@@ -13,7 +13,8 @@ public:
   MOCK_METHOD(void, setAlternatives,
               (const Origin& origin, std::vector<AlternateProtocol>& protocols));
   MOCK_METHOD(void, setSrtt, (const Origin& origin, std::chrono::microseconds srtt));
-  MOCK_METHOD(std::chrono::microseconds, getSrtt, (const Origin& origin), (const));
+  MOCK_METHOD(std::chrono::microseconds, getSrtt, (const Origin& origin, bool use_canonical_suffix),
+              (const));
   MOCK_METHOD(void, setConcurrentStreams, (const Origin& origin, uint32_t concurrent_streams));
   MOCK_METHOD(uint32_t, getConcurrentStreams, (const Origin& origin), (const));
   MOCK_METHOD(OptRef<const std::vector<AlternateProtocol>>, findAlternatives,
@@ -21,7 +22,10 @@ public:
   MOCK_METHOD(size_t, size, (), (const));
   MOCK_METHOD(HttpServerPropertiesCache::Http3StatusTracker&, getOrCreateHttp3StatusTracker,
               (const Origin& origin));
+  MOCK_METHOD(bool, isHttp3Broken, (const Origin& origin));
+  MOCK_METHOD(void, markHttp3Broken, (const Origin& origin));
   MOCK_METHOD(void, resetBrokenness, ());
+  MOCK_METHOD(void, resetStatus, ());
 };
 
 class MockHttpServerPropertiesCacheManager : public HttpServerPropertiesCacheManager {

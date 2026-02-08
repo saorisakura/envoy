@@ -29,7 +29,7 @@ void UdpConnPool::newStream(Router::GenericConnectionPoolCallbacks* callbacks) {
   Envoy::Network::SocketPtr socket = createSocket(host_);
   auto source_address_selector = host_->cluster().getUpstreamLocalAddressSelector();
   auto upstream_local_address = source_address_selector->getUpstreamLocalAddress(
-      host_->address(), /*socket_options=*/nullptr);
+      host_->address(), /*socket_options=*/nullptr, /*transport_socket_options=*/{});
   if (!Envoy::Network::Socket::applyOptions(upstream_local_address.socket_options_, *socket,
                                             envoy::config::core::v3::SocketOption::STATE_PREBIND)) {
     callbacks->onPoolFailure(ConnectionPool::PoolFailureReason::LocalConnectionFailure,
@@ -130,7 +130,7 @@ void UdpUpstream::onSocketReadReady() {
 void UdpUpstream::processPacket(Network::Address::InstanceConstSharedPtr /*local_address*/,
                                 Network::Address::InstanceConstSharedPtr /*peer_address*/,
                                 Buffer::InstancePtr buffer, MonotonicTime /*receive_time*/,
-                                uint8_t /*tos*/, Buffer::RawSlice /*saved_cmsg*/) {
+                                uint8_t /*tos*/, Buffer::OwnedImpl /*saved_cmsg*/) {
   std::string data = buffer->toString();
   quiche::ConnectUdpDatagramUdpPacketPayload payload(data);
   quiche::QuicheBuffer serialized_capsule =

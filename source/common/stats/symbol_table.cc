@@ -439,8 +439,7 @@ DynamicSpans SymbolTable::getDynamicSpans(StatName stat_name) const {
   // Note that with fake symbol tables, the Symbol lambda is called
   // once for each character in the string, and no dynamics will
   // be recorded.
-  Encoding::decodeTokens(
-      stat_name, [&index](Symbol) { ++index; }, record_dynamic);
+  Encoding::decodeTokens(stat_name, [&index](Symbol) { ++index; }, record_dynamic);
   return dynamic_spans;
 }
 
@@ -758,7 +757,7 @@ StatNameSet::StatNameSet(SymbolTable& symbol_table, absl::string_view name)
 void StatNameSet::rememberBuiltin(absl::string_view str) {
   StatName stat_name;
   {
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     stat_name = pool_.add(str);
   }
   builtin_stat_names_[str] = stat_name;

@@ -25,12 +25,15 @@ envoy_cc_library(
     deps = [
         ":engine_common_lib",
         ":engine_types_lib",
+        ":mobile_process_wide_lib",
         "//library/common/bridge:utility_lib",
         "//library/common/event:provisional_dispatcher_lib",
         "//library/common/http:client_lib",
         "//library/common/http:header_utility_lib",
         "//library/common/logger:logger_delegate_lib",
         "//library/common/network:connectivity_manager_lib",
+        "//library/common/network:network_types_lib",
+        "//library/common/network:proxy_api_lib",
         "//library/common/stats:utility_lib",
         "//library/common/types:c_types_lib",
         "@envoy//envoy/server:lifecycle_notifier_interface",
@@ -54,6 +57,7 @@ envoy_cc_library(
         "//library/common/extensions/filters/http/platform_bridge:filter_cc_proto_descriptor",
         "//library/common/extensions/filters/http/socket_tag:filter_cc_proto_descriptor",
         "//library/common/extensions/key_value/platform:platform_cc_proto_descriptor",
+        "//library/common/extensions/quic_packet_writer/platform:platform_packet_writer_proto_cc_proto_descriptor",
         "//library/common/extensions/retry/options/network_configuration:predicate_cc_proto_descriptor",
         "@envoy//source/common/common:minimal_logger_lib",
         "@envoy//source/common/common:random_generator_lib",
@@ -82,11 +86,27 @@ envoy_cc_library(
     ],
     repository = "@envoy",
     deps = [
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/functional:any_invocable",
-        "@com_google_absl//absl/strings",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/functional:any_invocable",
+        "@abseil-cpp//absl/strings",
         "@envoy//source/common/buffer:buffer_lib",
         "@envoy//source/common/common:base_logger_lib",
         "@envoy//source/common/http:header_map_lib",
+    ],
+)
+
+envoy_cc_library(
+    name = "mobile_process_wide_lib",
+    srcs = [
+        "mobile_process_wide.cc",
+    ],
+    hdrs = [
+        "mobile_process_wide.h",
+    ],
+    repository = "@envoy",
+    deps = [
+        "@envoy//source/common/common:minimal_logger_lib",
+        "@envoy//source/common/common:thread_lib",
+        "@envoy//source/server:options_base",
     ],
 )

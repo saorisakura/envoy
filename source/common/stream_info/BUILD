@@ -38,16 +38,15 @@ envoy_cc_library(
     name = "utility_lib",
     srcs = ["utility.cc"],
     hdrs = ["utility.h"],
-    external_deps = [
-        "abseil_optional",
-        "abseil_node_hash_map",
-    ],
     deps = [
         "//envoy/common:time_interface",
         "//envoy/http:codes_interface",
         "//envoy/stream_info:stream_info_interface",
         "//source/common/http:default_server_string_lib",
+        "//source/common/network:cidr_range_lib",
         "//source/common/runtime:runtime_features_lib",
+        "@abseil-cpp//absl/container:node_hash_map",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
     ],
 )

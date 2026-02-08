@@ -11,8 +11,8 @@
 #include "source/common/protobuf/utility.h"
 
 #ifndef IPP_CRYPTO_DISABLED
-#include "contrib/cryptomb/private_key_providers/source/ipp_crypto_impl.h"
 #include "contrib/cryptomb/private_key_providers/source/cryptomb_private_key_provider.h"
+#include "contrib/cryptomb/private_key_providers/source/ipp_crypto_impl.h"
 #endif
 
 #include "contrib/envoy/extensions/private_key_providers/cryptomb/v3alpha/cryptomb.pb.h"
@@ -31,8 +31,8 @@ CryptoMbPrivateKeyMethodFactory::createPrivateKeyMethodProviderInstance(
       std::make_unique<envoy::extensions::private_key_providers::cryptomb::v3alpha::
                            CryptoMbPrivateKeyMethodConfig>();
 
-  Config::Utility::translateOpaqueConfig(proto_config.typed_config(),
-                                         ProtobufMessage::getNullValidationVisitor(), *message);
+  THROW_IF_NOT_OK(Config::Utility::translateOpaqueConfig(
+      proto_config.typed_config(), ProtobufMessage::getNullValidationVisitor(), *message));
   const envoy::extensions::private_key_providers::cryptomb::v3alpha::CryptoMbPrivateKeyMethodConfig
       conf =
           MessageUtil::downcastAndValidate<const envoy::extensions::private_key_providers::

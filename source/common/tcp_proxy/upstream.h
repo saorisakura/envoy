@@ -17,6 +17,7 @@
 #include "source/common/http/codec_client.h"
 #include "source/common/http/hash_policy.h"
 #include "source/common/http/null_route_impl.h"
+#include "source/common/http/response_decoder_impl_base.h"
 #include "source/common/network/utility.h"
 #include "source/common/router/config_impl.h"
 #include "source/common/router/header_parser.h"
@@ -30,7 +31,7 @@ constexpr absl::string_view DisableTunnelingFilterStateKey = "envoy.tcp_proxy.di
 
 class TcpConnPool : public GenericConnPool, public Tcp::ConnectionPool::Callbacks {
 public:
-  TcpConnPool(Upstream::ThreadLocalCluster& thread_local_cluster,
+  TcpConnPool(Upstream::HostConstSharedPtr host, Upstream::ThreadLocalCluster& thread_local_cluster,
               Upstream::LoadBalancerContext* context,
               Tcp::ConnectionPool::UpstreamCallbacks& upstream_callbacks,
               StreamInfo::StreamInfo& downstream_info);
@@ -78,7 +79,8 @@ public:
 
 class HttpConnPool : public GenericConnPool, public Http::ConnectionPool::Callbacks {
 public:
-  HttpConnPool(Upstream::ThreadLocalCluster& thread_local_cluster,
+  HttpConnPool(Upstream::HostConstSharedPtr host,
+               Upstream::ThreadLocalCluster& thread_local_cluster,
                Upstream::LoadBalancerContext* context, const TunnelingConfigHelper& config,
                Tcp::ConnectionPool::UpstreamCallbacks& upstream_callbacks,
                Http::StreamDecoderFilterCallbacks&, Http::CodecType type,
@@ -89,7 +91,8 @@ public:
 
   bool valid() const { return conn_pool_data_.has_value() || generic_conn_pool_; }
   Http::CodecType codecType() const { return type_; }
-  std::unique_ptr<Router::GenericConnPool> createConnPool(Upstream::ThreadLocalCluster&,
+  std::unique_ptr<Router::GenericConnPool> createConnPool(Upstream::HostConstSharedPtr host,
+                                                          Upstream::ThreadLocalCluster&,
                                                           Upstream::LoadBalancerContext* context,
                                                           absl::optional<Http::Protocol> protocol);
 
@@ -175,6 +178,7 @@ public:
   Tcp::ConnectionPool::ConnectionData* onDownstreamEvent(Network::ConnectionEvent event) override;
   bool startUpstreamSecureTransport() override;
   Ssl::ConnectionInfoConstSharedPtr getUpstreamConnectionSslInfo() override;
+  StreamInfo::DetectedCloseType detectedCloseType() const override;
 
 private:
   Tcp::ConnectionPool::ConnectionDataPtr upstream_conn_data_;
@@ -215,10 +219,10 @@ public:
     conn_pool_callbacks_ = std::move(callbacks);
   }
   Ssl::ConnectionInfoConstSharedPtr getUpstreamConnectionSslInfo() override { return nullptr; }
+  StreamInfo::DetectedCloseType detectedCloseType() const override;
 
 protected:
   void resetEncoder(Network::ConnectionEvent event, bool inform_downstream = true);
-
   // The encoder offered by the upstream http client.
   Http::RequestEncoder* request_encoder_{};
   // The config object that is owned by the downstream network filter chain factory.
@@ -228,8 +232,7 @@ protected:
   std::unique_ptr<Http::RequestHeaderMapImpl> downstream_headers_;
 
 private:
-  Upstream::ClusterInfoConstSharedPtr cluster_;
-  class DecoderShim : public Http::ResponseDecoder {
+  class DecoderShim : public Http::ResponseDecoderImplBase {
   public:
     DecoderShim(HttpUpstream& parent) : parent_(parent) {}
     void decode1xxHeaders(Http::ResponseHeaderMapPtr&&) override {}
@@ -253,12 +256,8 @@ private:
     void decodeTrailers(Http::ResponseTrailerMapPtr&& trailers) override {
       parent_.config_.propagateResponseTrailers(std::move(trailers),
                                                 parent_.downstream_info_.filterState());
-      if (Runtime::runtimeFeatureEnabled(
-              "envoy.reloadable_features.tcp_tunneling_send_downstream_fin_on_upstream_trailers")) {
-        Buffer::OwnedImpl data;
-        parent_.upstream_callbacks_.onUpstreamData(data, /* end_stream = */ true);
-      }
-
+      Buffer::OwnedImpl data;
+      parent_.upstream_callbacks_.onUpstreamData(data, /* end_stream = */ true);
       parent_.doneReading();
     }
     void decodeMetadata(Http::MetadataMapPtr&&) override {}
@@ -300,11 +299,13 @@ public:
   void setConnPoolCallbacks(std::unique_ptr<HttpConnPool::Callbacks>&& callbacks) {
     conn_pool_callbacks_ = std::move(callbacks);
   }
+  void recordUpstreamSslConnection();
   void addBytesSentCallback(Network::Connection::BytesSentCb) override{};
   // HTTP upstream must not implement converting upstream transport
   // socket from non-secure to secure mode.
   bool startUpstreamSecureTransport() override { return false; }
   Ssl::ConnectionInfoConstSharedPtr getUpstreamConnectionSslInfo() override { return nullptr; }
+  StreamInfo::DetectedCloseType detectedCloseType() const override;
 
   // Router::RouterFilterInterface
   void onUpstreamHeaders(uint64_t response_code, Http::ResponseHeaderMapPtr&& headers,
@@ -323,6 +324,8 @@ public:
   void onPerTryTimeout(UpstreamRequest&) override {}
   void onPerTryIdleTimeout(UpstreamRequest&) override {}
   void onStreamMaxDurationReached(UpstreamRequest&) override {}
+  void setupRouteTimeoutForWebsocketUpgrade() override {}
+  void disableRouteTimeoutForWebsocketUpgrade() override {}
   Http::StreamDecoderFilterCallbacks* callbacks() override { return &decoder_filter_callbacks_; }
   Upstream::ClusterInfoConstSharedPtr cluster() override {
     return decoder_filter_callbacks_.clusterInfo();
@@ -352,7 +355,7 @@ protected:
 
 private:
   Http::StreamDecoderFilterCallbacks& decoder_filter_callbacks_;
-  class DecoderShim : public Http::ResponseDecoder {
+  class DecoderShim : public Http::ResponseDecoderImplBase {
   public:
     DecoderShim(CombinedUpstream& parent) : parent_(parent) {}
     // Http::ResponseDecoder
@@ -377,11 +380,8 @@ private:
     void decodeTrailers(Http::ResponseTrailerMapPtr&& trailers) override {
       parent_.config_.propagateResponseTrailers(std::move(trailers),
                                                 parent_.downstream_info_.filterState());
-      if (Runtime::runtimeFeatureEnabled(
-              "envoy.reloadable_features.tcp_tunneling_send_downstream_fin_on_upstream_trailers")) {
-        Buffer::OwnedImpl data;
-        parent_.upstream_callbacks_.onUpstreamData(data, /* end_stream = */ true);
-      }
+      Buffer::OwnedImpl data;
+      parent_.upstream_callbacks_.onUpstreamData(data, /* end_stream = */ true);
       parent_.doneReading();
     }
     void decodeMetadata(Http::MetadataMapPtr&&) override {}
@@ -400,6 +400,7 @@ private:
   // upstream_request_ has to be destroyed first as they may use CombinedUpstream parent
   // during destruction.
   UpstreamRequestPtr upstream_request_;
+  Http::CodecType type_;
 };
 
 } // namespace TcpProxy

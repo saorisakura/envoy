@@ -15,11 +15,10 @@
 namespace Envoy {
 namespace Config {
 
-// Context (data) needed for creating a GrpcMux object.
-// These are parameters needed for the creation of all GrpcMux objects.
+// Context (data) needed for creating any GrpcMux object.
 struct GrpcMuxContext {
-  Grpc::RawAsyncClientPtr async_client_;
-  Grpc::RawAsyncClientPtr failover_async_client_;
+  Grpc::RawAsyncClientSharedPtr async_client_;
+  Grpc::RawAsyncClientSharedPtr failover_async_client_;
   Event::Dispatcher& dispatcher_;
   const Protobuf::MethodDescriptor& service_method_;
   const LocalInfo::LocalInfo& local_info_;
@@ -31,6 +30,7 @@ struct GrpcMuxContext {
   BackOffStrategyPtr backoff_strategy_;
   const std::string& target_xds_authority_;
   EdsResourcesCachePtr eds_resources_cache_;
+  bool skip_subsequent_node_;
 };
 
 } // namespace Config

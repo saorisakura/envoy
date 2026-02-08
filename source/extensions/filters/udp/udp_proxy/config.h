@@ -49,11 +49,11 @@ public:
                       Server::Configuration::FactoryContext& context);
 
   const std::string proxyHost(const StreamInfo::StreamInfo& stream_info) const override {
-    return proxy_host_formatter_->formatWithContext({}, stream_info);
+    return proxy_host_formatter_->format({}, stream_info);
   }
 
   const std::string targetHost(const StreamInfo::StreamInfo& stream_info) const override {
-    return target_host_formatter_->formatWithContext({}, stream_info);
+    return target_host_formatter_->format({}, stream_info);
   }
 
   const absl::optional<uint32_t>& proxyPort() const override { return proxy_port_; };
@@ -61,6 +61,7 @@ public:
   bool usePost() const override { return use_post_; };
   const std::string& postPath() const override { return post_path_; }
   Http::HeaderEvaluator& headerEvaluator() const override { return *header_parser_; };
+  const BackOffStrategyPtr& backoffStrategy() const override { return backoff_strategy_; };
   uint32_t maxConnectAttempts() const override { return max_connect_attempts_; };
   bool bufferEnabled() const override { return buffer_enabled_; };
   uint32_t maxBufferedDatagrams() const override { return max_buffered_datagrams_; };
@@ -100,6 +101,7 @@ private:
   bool use_post_;
   std::string post_path_;
   const uint32_t max_connect_attempts_;
+  BackOffStrategyPtr backoff_strategy_;
   bool buffer_enabled_;
   uint32_t max_buffered_datagrams_;
   uint64_t max_buffered_bytes_;
@@ -139,10 +141,10 @@ public:
   const Network::ResolvedUdpSocketConfig& upstreamSocketConfig() const override {
     return upstream_socket_config_;
   }
-  const std::vector<AccessLog::InstanceSharedPtr>& sessionAccessLogs() const override {
+  const AccessLog::InstanceSharedPtrVector& sessionAccessLogs() const override {
     return session_access_logs_;
   }
-  const std::vector<AccessLog::InstanceSharedPtr>& proxyAccessLogs() const override {
+  const AccessLog::InstanceSharedPtrVector& proxyAccessLogs() const override {
     return proxy_access_logs_;
   }
   const UdpSessionFilterChainFactory& sessionFilterFactory() const override { return *this; };
@@ -157,14 +159,18 @@ public:
   Random::RandomGenerator& randomGenerator() const override { return random_generator_; }
 
   // UdpSessionFilterChainFactory
-  void createFilterChain(Network::UdpSessionFilterChainFactoryCallbacks& callbacks) const override {
+  bool createFilterChain(Network::UdpSessionFilterChainFactoryCallbacks& callbacks) const override {
     for (const auto& filter_config_provider : filter_factories_) {
       auto config = filter_config_provider->config();
-      if (config.has_value()) {
-        Network::UdpSessionFilterFactoryCb& factory = config.value();
-        factory(callbacks);
+      if (!config.has_value()) {
+        return false;
       }
+
+      Network::UdpSessionFilterFactoryCb& factory = config.value();
+      factory(callbacks);
     }
+
+    return true;
   };
 
 private:
@@ -190,8 +196,8 @@ private:
   std::unique_ptr<const HashPolicyImpl> hash_policy_;
   mutable UdpProxyDownstreamStats stats_;
   const Network::ResolvedUdpSocketConfig upstream_socket_config_;
-  std::vector<AccessLog::InstanceSharedPtr> session_access_logs_;
-  std::vector<AccessLog::InstanceSharedPtr> proxy_access_logs_;
+  AccessLog::InstanceSharedPtrVector session_access_logs_;
+  AccessLog::InstanceSharedPtrVector proxy_access_logs_;
   UdpTunnelingConfigPtr tunneling_config_;
   std::shared_ptr<UdpSessionFilterConfigProviderManager>
       udp_session_filter_config_provider_manager_;
@@ -215,7 +221,13 @@ public:
                      config, context.messageValidationVisitor()));
     return [shared_config](Network::UdpListenerFilterManager& filter_manager,
                            Network::UdpReadFilterCallbacks& callbacks) -> void {
-      filter_manager.addReadFilter(std::make_unique<UdpProxyFilter>(callbacks, shared_config));
+      if (shared_config->usingPerPacketLoadBalancing()) {
+        filter_manager.addReadFilter(
+            std::make_unique<PerPacketLoadBalancingUdpProxyFilter>(callbacks, shared_config));
+      } else {
+        filter_manager.addReadFilter(
+            std::make_unique<StickySessionUdpProxyFilter>(callbacks, shared_config));
+      }
     };
   }
 

@@ -10,6 +10,7 @@
 #include "source/common/matcher/matcher.h"
 #include "source/common/protobuf/utility.h"
 #include "source/extensions/filters/http/common/factory_base.h"
+#include "source/extensions/filters/http/composite/action.h"
 
 #include "xds/type/matcher/v3/http_inputs.pb.h"
 
@@ -26,27 +27,24 @@ class CompositeFilterFactory
 public:
   CompositeFilterFactory() : DualFactoryBase("envoy.filters.http.composite") {}
 
+  // Bring base class overloads into scope to avoid hiding them.
+  using DualFactoryBase::createFilterFactoryFromProto;
+
+  // Override to compile named filter chains with FactoryContext access.
+  absl::StatusOr<Http::FilterFactoryCb>
+  createFilterFactoryFromProto(const Protobuf::Message& config, const std::string& stats_prefix,
+                               Server::Configuration::FactoryContext& context) override;
+
   absl::StatusOr<Http::FilterFactoryCb> createFilterFactoryFromProtoTyped(
       const envoy::extensions::filters::http::composite::v3::Composite& proto_config,
       const std::string& stats_prefix, DualInfo dual_info,
       Server::Configuration::ServerFactoryContext& context) override;
 
-  Server::Configuration::MatchingRequirementsPtr matchingRequirements() override {
-    auto requirements = std::make_unique<
-        envoy::extensions::filters::common::dependency::v3::MatchingRequirements>();
-
-    // This ensure that trees are only allowed to match on request headers, avoiding configurations
-    // where the matcher requires data that will be available too late for the delegation to work
-    // correctly.
-    auto* allow_list = requirements->mutable_data_input_allow_list();
-    allow_list->add_type_url(TypeUtil::descriptorFullNameToTypeUrl(
-        envoy::type::matcher::v3::HttpRequestHeaderMatchInput::descriptor()->full_name()));
-    // CEL matcher and its input is also allowed.
-    allow_list->add_type_url(TypeUtil::descriptorFullNameToTypeUrl(
-        xds::type::matcher::v3::HttpAttributesCelMatchInput::descriptor()->full_name()));
-
-    return requirements;
-  }
+  // Compiles named filter chains from the config.
+  static absl::StatusOr<NamedFilterChainFactoryMapSharedPtr>
+  compileNamedFilterChains(const envoy::extensions::filters::http::composite::v3::Composite& config,
+                           const std::string& stats_prefix,
+                           Server::Configuration::FactoryContext& context);
 };
 
 using UpstreamCompositeFilterFactory = CompositeFilterFactory;

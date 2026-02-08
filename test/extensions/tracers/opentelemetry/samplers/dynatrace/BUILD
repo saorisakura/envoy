@@ -15,6 +15,7 @@ envoy_extension_cc_test(
     name = "config_test",
     srcs = ["config_test.cc"],
     extension_names = ["envoy.tracers.opentelemetry.samplers.dynatrace"],
+    rbe_pool = "6gig",
     deps = [
         "//envoy/registry",
         "//source/extensions/tracers/opentelemetry/samplers/dynatrace:config",
@@ -28,13 +29,16 @@ envoy_extension_cc_test(
     name = "dynatrace_sampler_test",
     srcs = [
         "dynatrace_sampler_test.cc",
+        "dynatrace_tag_test.cc",
         "sampler_config_provider_test.cc",
         "sampler_config_test.cc",
         "sampling_controller_test.cc",
         "stream_summary_test.cc",
         "tenant_id_test.cc",
+        "trace_capture_reason_test.cc",
     ],
     extension_names = ["envoy.tracers.opentelemetry.samplers.dynatrace"],
+    rbe_pool = "6gig",
     deps = [
         "//source/extensions/tracers/opentelemetry/samplers/dynatrace:dynatrace_sampler_lib",
         "//test/mocks/server:tracer_factory_context_mocks",
@@ -50,6 +54,7 @@ envoy_extension_cc_test(
         "dynatrace_sampler_integration_test.cc",
     ],
     extension_names = ["envoy.tracers.opentelemetry.samplers.dynatrace"],
+    rbe_pool = "6gig",
     deps = [
         "//source/exe:main_common_lib",
         "//source/extensions/tracers/opentelemetry:config",

@@ -108,7 +108,7 @@ public:
   findPerRouteVerifier(const PerRouteFilterConfig& per_route) const override;
 
   // methods for AuthFactory interface. Factory method to help create authenticators.
-  AuthenticatorPtr create(const ::google::jwt_verify::CheckAudience* check_audience,
+  AuthenticatorPtr create(const JwtVerify::CheckAudience* check_audience,
                           const absl::optional<std::string>& provider, bool allow_failed,
                           bool allow_missing) const override {
     return Authenticator::create(check_audience, provider, allow_failed, allow_missing,
@@ -116,8 +116,9 @@ public:
   }
 
 private:
-  JwtAuthnFilterStats generateStats(const std::string& prefix, Stats::Scope& scope) {
-    const std::string final_prefix = prefix + "jwt_authn.";
+  JwtAuthnFilterStats generateStats(const std::string& prefix,
+                                    const std::string& filter_stats_prefix, Stats::Scope& scope) {
+    const std::string final_prefix = absl::StrCat(prefix, "jwt_authn.", filter_stats_prefix);
     return {ALL_JWT_AUTHN_FILTER_STATS(POOL_COUNTER_PREFIX(scope, final_prefix))};
   }
 

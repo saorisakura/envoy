@@ -20,12 +20,13 @@ bool FileSystemBufferFilter::initPerRouteConfig() {
   auto route = request_callbacks_->route();
   FilterConfigVector config_chain;
   if (route) {
-    route->traversePerFilterConfig(
-        FileSystemBufferFilter::filterName(),
-        [&config_chain](const Router::RouteSpecificFilterConfig& route_cfg) {
-          auto cfg = dynamic_cast<const FileSystemBufferFilterConfig*>(&route_cfg);
-          config_chain.emplace_back(*cfg);
-        });
+    // TODO(wbpcode): fix this to use the callbacks to get the route specific configs.
+    for (const auto* cfg : route->perFilterConfigs(FileSystemBufferFilter::filterName())) {
+      auto typed_cfg = dynamic_cast<const FileSystemBufferFilterConfig*>(cfg);
+      if (typed_cfg) {
+        config_chain.emplace_back(*typed_cfg);
+      }
+    }
   }
   config_chain.emplace_back(*base_config_);
   config_.emplace(config_chain);
@@ -66,7 +67,7 @@ Http::FilterHeadersStatus FileSystemBufferFilter::decodeHeaders(Http::RequestHea
   // means we still have the thread potentially using twice the memory that the user configured as
   // the memory limit, once in our own buffer and once in the outgoing buffer. (Plus overflow
   // because the limit isn't hard.)
-  request_callbacks_->setDecoderBufferLimit(request_state_.config_->memoryBufferBytesLimit());
+  request_callbacks_->setBufferLimit(request_state_.config_->memoryBufferBytesLimit());
   request_headers_ = &headers;
   return Http::FilterHeadersStatus::StopIteration;
 }
@@ -94,7 +95,7 @@ Http::FilterHeadersStatus FileSystemBufferFilter::encodeHeaders(Http::ResponseHe
   // means we still have the thread potentially using twice the memory that the user configured as
   // the memory limit, once in our own buffer and once in the outgoing buffer. (Plus overflow
   // because the limit isn't hard.)
-  response_callbacks_->setEncoderBufferLimit(response_state_.config_->memoryBufferBytesLimit());
+  response_callbacks_->setBufferLimit(response_state_.config_->memoryBufferBytesLimit());
   response_headers_ = &headers;
   return Http::FilterHeadersStatus::StopIteration;
 }
@@ -178,6 +179,7 @@ Http::FilterTrailersStatus FileSystemBufferFilter::receiveTrailers(const BufferB
     return Http::FilterTrailersStatus::Continue;
   }
   state.seen_end_stream_ = true;
+  state.seen_trailers_ = true;
   dispatchStateChanged();
   return Http::FilterTrailersStatus::StopIteration;
 }
@@ -243,7 +245,9 @@ void FileSystemBufferFilter::maybeOutputRequest() {
       request_state_.memory_used_ -= request_state_.buffer_.front()->size();
       auto out = request_state_.buffer_.front()->extract();
       request_state_.buffer_.pop_front();
-      request_callbacks_->injectDecodedDataToFilterChain(*out, false);
+      bool end_stream = (request_state_.buffer_.empty() && request_state_.seen_end_stream_ &&
+                         !request_state_.seen_trailers_);
+      request_callbacks_->injectDecodedDataToFilterChain(*out, end_stream);
     }
   }
   if (request_state_.buffer_.empty() && request_state_.seen_end_stream_) {
@@ -268,7 +272,9 @@ bool FileSystemBufferFilter::maybeOutputResponse() {
       response_state_.memory_used_ -= response_state_.buffer_.front()->size();
       auto out = response_state_.buffer_.front()->extract();
       response_state_.buffer_.pop_front();
-      response_callbacks_->injectEncodedDataToFilterChain(*out, false);
+      bool end_stream = (response_state_.buffer_.empty() && response_state_.seen_end_stream_ &&
+                         !response_state_.seen_trailers_);
+      response_callbacks_->injectEncodedDataToFilterChain(*out, end_stream);
     }
   }
   if (response_state_.buffer_.empty() && response_state_.seen_end_stream_) {
@@ -281,7 +287,7 @@ bool FileSystemBufferFilter::maybeOutputResponse() {
 
 void BufferedStreamState::close() {
   if (async_file_handle_) {
-    auto queued = async_file_handle_->close([](absl::Status) {});
+    auto queued = async_file_handle_->close(nullptr, [](absl::Status) {});
     ASSERT(queued.ok());
   }
 }
@@ -373,11 +379,11 @@ bool FileSystemBufferFilter::maybeStorage(BufferedStreamState& state,
       state.storage_used_ -= size;
       state.memory_used_ += size;
       ENVOY_STREAM_LOG(debug, "retrieving buffer fragment (size={}) from storage", callbacks, size);
-      auto queued =
-          (**earliest_storage_fragment)
-              .fromStorage(state.async_file_handle_, getSafeDispatch(), getOnFileActionCompleted());
+      auto queued = (**earliest_storage_fragment)
+                        .fromStorage(state.async_file_handle_, request_callbacks_->dispatcher(),
+                                     getOnFileActionCompleted());
       ASSERT(queued.ok());
-      cancel_in_flight_async_action_ = queued.value();
+      cancel_in_flight_async_action_ = std::move(queued.value());
       return true;
     }
   }
@@ -387,30 +393,19 @@ bool FileSystemBufferFilter::maybeStorage(BufferedStreamState& state,
     if (!state.async_file_handle_) {
       // File isn't open yet - open it and then check again if we still need to store data.
       ENVOY_STREAM_LOG(debug, "memory buffer exceeded - creating buffer file", callbacks);
-      // We can't use getSafeDispatcher here because we need to close the file if the filter
-      // was deleted before the callback, not just do nothing.
+      // The callback won't be called if the filter was destroyed, and if the file was
+      // racily created it will be closed.
       cancel_in_flight_async_action_ = config_->asyncFileManager().createAnonymousFile(
-          config_->storageBufferPath(),
-          [this, is_destroyed = is_destroyed_, dispatcher = &request_callbacks_->dispatcher(),
-           &state](absl::StatusOr<AsyncFileHandle> file_handle) {
-            dispatcher->post([this, is_destroyed, &state, file_handle]() {
-              if (*is_destroyed) {
-                // If we opened a file but the filter went away in the meantime, close the file
-                // to avoid leaving a dangling file handle.
-                if (file_handle.ok()) {
-                  file_handle.value()->close([](absl::Status) {}).IgnoreError();
-                }
-                return;
-              }
-              if (!file_handle.ok()) {
-                filterError(fmt::format("{} failed to create buffer file: {}", filterName(),
-                                        file_handle.status().ToString()));
-                return;
-              }
-              state.async_file_handle_ = std::move(file_handle.value());
-              cancel_in_flight_async_action_ = nullptr;
-              onStateChange();
-            });
+          &request_callbacks_->dispatcher(), config_->storageBufferPath(),
+          [this, &state](absl::StatusOr<AsyncFileHandle> file_handle) {
+            if (!file_handle.ok()) {
+              filterError(fmt::format("{} failed to create buffer file: {}", filterName(),
+                                      file_handle.status().ToString()));
+              return;
+            }
+            state.async_file_handle_ = std::move(file_handle.value());
+            cancel_in_flight_async_action_ = nullptr;
+            onStateChange();
           });
       return true;
     }
@@ -422,18 +417,19 @@ bool FileSystemBufferFilter::maybeStorage(BufferedStreamState& state,
     state.storage_consumed_ += size;
     state.memory_used_ -= size;
     ENVOY_STREAM_LOG(debug, "sending buffer fragment (size={}) to storage", callbacks, size);
-    auto to_storage = fragment->toStorage(state.async_file_handle_, state.storage_offset_,
-                                          getSafeDispatch(), getOnFileActionCompleted());
+    auto to_storage =
+        fragment->toStorage(state.async_file_handle_, state.storage_offset_,
+                            request_callbacks_->dispatcher(), getOnFileActionCompleted());
     ASSERT(to_storage.ok());
-    cancel_in_flight_async_action_ = to_storage.value();
+    cancel_in_flight_async_action_ = std::move(to_storage.value());
     state.storage_offset_ += size;
     return true;
   }
   return false;
 }
 
-std::function<void(absl::Status)> FileSystemBufferFilter::getOnFileActionCompleted() {
-  // This callback is only run via getSafeDispatch, so is safe to capture 'this' -
+absl::AnyInvocable<void(absl::Status)> FileSystemBufferFilter::getOnFileActionCompleted() {
+  // This callback is aborted in onDestroy, so is safe to capture 'this' -
   // it won't be called if the filter has been deleted.
   return [this](absl::Status status) {
     cancel_in_flight_async_action_ = nullptr;
@@ -445,19 +441,17 @@ std::function<void(absl::Status)> FileSystemBufferFilter::getOnFileActionComplet
   };
 }
 
-std::function<void(std::function<void()>)> FileSystemBufferFilter::getSafeDispatch() {
-  return [is_destroyed = is_destroyed_,
-          dispatcher = &request_callbacks_->dispatcher()](std::function<void()> callback) {
-    dispatcher->post([is_destroyed, callback = std::move(callback)]() {
-      if (!*is_destroyed) {
-        callback();
-      }
-    });
-  };
+void FileSystemBufferFilter::safeDispatch(absl::AnyInvocable<void()> fn) {
+  request_callbacks_->dispatcher().post(
+      [is_destroyed = is_destroyed_, fn = std::move(fn)]() mutable {
+        if (!*is_destroyed) {
+          std::move(fn)();
+        }
+      });
 }
 
 void FileSystemBufferFilter::dispatchStateChanged() {
-  getSafeDispatch()([this]() { onStateChange(); });
+  safeDispatch([this]() { onStateChange(); });
 }
 
 } // namespace FileSystemBuffer

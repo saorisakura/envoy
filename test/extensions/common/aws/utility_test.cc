@@ -2,12 +2,12 @@
 
 #include "source/extensions/common/aws/utility.h"
 
-#include "test/extensions/common/aws/mocks.h"
 #include "test/mocks/server/server_factory_context.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/utility.h"
 
 #include "gtest/gtest.h"
+#include "openssl/crypto.h"
 
 using testing::ElementsAre;
 using testing::NiceMock;
@@ -66,10 +66,10 @@ TEST(UtilityTest, TestProfileResolver) {
   auto file_path = TestEnvironment::writeStringToFileForTest(
       credential_file, CREDENTIALS_FILE_CONTENTS, true, false);
 
-  Utility::resolveProfileElements(file_path, "default", elements);
+  Utility::resolveProfileElementsFromFile(file_path, "default", elements);
   it = elements.find("AWS_ACCESS_KEY_ID");
   EXPECT_EQ(it->second, "default_access_key");
-  Utility::resolveProfileElements(file_path, "profile4", elements);
+  Utility::resolveProfileElementsFromFile(file_path, "profile4", elements);
   it = elements.find("AWS_ACCESS_KEY_ID");
   EXPECT_EQ(it->second, "profile4_access_key");
 }
@@ -80,8 +80,8 @@ TEST(UtilityTest, CanonicalizeHeadersInAlphabeticalOrder) {
       {"d", "d_value"}, {"f", "f_value"}, {"b", "b_value"},
       {"e", "e_value"}, {"c", "c_value"}, {"a", "a_value"},
   };
-  std::vector<Matchers::StringMatcherPtr> exclusion_list = {};
-  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list);
+  std::vector<Matchers::StringMatcherPtr> exclusion_list, inclusion_list = {};
+  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list, inclusion_list);
   EXPECT_THAT(map, ElementsAre(Pair("a", "a_value"), Pair("b", "b_value"), Pair("c", "c_value"),
                                Pair("d", "d_value"), Pair("e", "e_value"), Pair("f", "f_value")));
 }
@@ -93,8 +93,8 @@ TEST(UtilityTest, CanonicalizeHeadersSkippingPseudoHeaders) {
       {":method", "GET"},
       {"normal", "normal_value"},
   };
-  std::vector<Envoy::Matchers::StringMatcherPtr> exclusion_list = {};
-  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list);
+  std::vector<Matchers::StringMatcherPtr> exclusion_list, inclusion_list = {};
+  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list, inclusion_list);
   EXPECT_THAT(map, ElementsAre(Pair("normal", "normal_value")));
 }
 
@@ -105,8 +105,8 @@ TEST(UtilityTest, CanonicalizeHeadersJoiningDuplicatesWithCommas) {
       {"a", "a_value2"},
       {"a", "a_value3"},
   };
-  std::vector<Matchers::StringMatcherPtr> exclusion_list = {};
-  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list);
+  std::vector<Matchers::StringMatcherPtr> exclusion_list, inclusion_list = {};
+  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list, inclusion_list);
   EXPECT_THAT(map, ElementsAre(Pair("a", "a_value1,a_value2,a_value3")));
 }
 
@@ -115,8 +115,8 @@ TEST(UtilityTest, CanonicalizeHeadersAuthorityToHost) {
   Http::TestRequestHeaderMapImpl headers{
       {":authority", "authority_value"},
   };
-  std::vector<Matchers::StringMatcherPtr> exclusion_list = {};
-  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list);
+  std::vector<Matchers::StringMatcherPtr> exclusion_list, inclusion_list = {};
+  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list, inclusion_list);
   EXPECT_THAT(map, ElementsAre(Pair("host", "authority_value")));
 }
 
@@ -125,14 +125,17 @@ TEST(UtilityTest, CanonicalizeHeadersRemovingDefaultPortsFromHost) {
   Http::TestRequestHeaderMapImpl headers_port80{
       {":authority", "example.com:80"},
   };
-  std::vector<Matchers::StringMatcherPtr> exclusion_list = {};
-  const auto map_port80 = Utility::canonicalizeHeaders(headers_port80, exclusion_list);
+  std::vector<Matchers::StringMatcherPtr> exclusion_list, inclusion_list = {};
+  const auto map_port80 =
+      Utility::canonicalizeHeaders(headers_port80, exclusion_list, inclusion_list);
+
   EXPECT_THAT(map_port80, ElementsAre(Pair("host", "example.com")));
 
   Http::TestRequestHeaderMapImpl headers_port443{
       {":authority", "example.com:443"},
   };
-  const auto map_port443 = Utility::canonicalizeHeaders(headers_port443, exclusion_list);
+  const auto map_port443 =
+      Utility::canonicalizeHeaders(headers_port443, exclusion_list, inclusion_list);
   EXPECT_THAT(map_port443, ElementsAre(Pair("host", "example.com")));
 }
 
@@ -144,8 +147,8 @@ TEST(UtilityTest, CanonicalizeHeadersTrimmingWhitespace) {
       {"internal", "internal    value"},
       {"all", "    all    value    "},
   };
-  std::vector<Matchers::StringMatcherPtr> exclusion_list = {};
-  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list);
+  std::vector<Matchers::StringMatcherPtr> exclusion_list, inclusion_list = {};
+  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list, inclusion_list);
   EXPECT_THAT(map,
               ElementsAre(Pair("all", "all value"), Pair("internal", "internal value"),
                           Pair("leading", "leading value"), Pair("trailing", "trailing value")));
@@ -159,25 +162,21 @@ TEST(UtilityTest, CanonicalizeHeadersDropExcludedMatchers) {
       {"x-forwarded-proto", "https"},         {"x-amz-date", "20130708T220855Z"},
       {"x-amz-content-sha256", "e3b0c44..."}, {"x-envoy-retry-on", "5xx,reset"},
       {"x-envoy-max-retries", "3"},           {"x-amzn-trace-id", "0123456789"}};
-  std::vector<Matchers::StringMatcherPtr> exclusion_list = {};
+  std::vector<Matchers::StringMatcherPtr> exclusion_list, inclusion_list = {};
   std::vector<std::string> exact_matches = {"x-amzn-trace-id", "x-forwarded-for",
                                             "x-forwarded-proto"};
   for (auto& str : exact_matches) {
     envoy::type::matcher::v3::StringMatcher config;
     config.set_exact(str);
-    exclusion_list.emplace_back(
-        std::make_unique<Matchers::StringMatcherImpl<envoy::type::matcher::v3::StringMatcher>>(
-            config, context));
+    exclusion_list.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config, context));
   }
   std::vector<std::string> prefixes = {"x-envoy"};
   for (auto& match_str : prefixes) {
     envoy::type::matcher::v3::StringMatcher config;
     config.set_prefix(match_str);
-    exclusion_list.emplace_back(
-        std::make_unique<Matchers::StringMatcherImpl<envoy::type::matcher::v3::StringMatcher>>(
-            config, context));
+    exclusion_list.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config, context));
   }
-  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list);
+  const auto map = Utility::canonicalizeHeaders(headers, exclusion_list, inclusion_list);
   EXPECT_THAT(map,
               ElementsAre(Pair("host", "example.com"), Pair("x-amz-content-sha256", "e3b0c44..."),
                           Pair("x-amz-date", "20130708T220855Z")));
@@ -186,28 +185,32 @@ TEST(UtilityTest, CanonicalizeHeadersDropExcludedMatchers) {
 // Verify the format of a minimalist canonical request
 TEST(UtilityTest, MinimalCanonicalRequest) {
   std::map<std::string, std::string> headers;
+  const auto request = Utility::createCanonicalRequest(
+      "GET", "", headers, "content-hash", Utility::shouldNormalizeUriPath("vpc-lattice-svcs"),
+      Utility::useDoubleUriEncode("vpc-lattice-svcs"));
+  EXPECT_EQ("GET\n/\n\n\n\ncontent-hash", request);
+}
+
+TEST(UtilityTest, CanonicalRequestNoPathDontNormalizeURI) {
+  std::map<std::string, std::string> headers;
   const auto request =
-      Utility::createCanonicalRequest("appmesh", "GET", "", headers, "content-hash");
-  EXPECT_EQ(R"(GET
-/
+      Utility::createCanonicalRequest("GET", "", headers, "content-hash", false, false);
+  EXPECT_EQ("GET\n/\n\n\n\ncontent-hash", request);
+}
 
-
-
-content-hash)",
-            request);
+TEST(UtilityTest, CanonicalRequestNoPathNormalizeURI) {
+  std::map<std::string, std::string> headers;
+  const auto request =
+      Utility::createCanonicalRequest("GET", "", headers, "content-hash", true, false);
+  EXPECT_EQ("GET\n/\n\n\n\ncontent-hash", request);
 }
 
 TEST(UtilityTest, CanonicalRequestWithQueryString) {
   const std::map<std::string, std::string> headers;
-  const auto request =
-      Utility::createCanonicalRequest("appmesh", "GET", "?query", headers, "content-hash");
-  EXPECT_EQ(R"(GET
-/
-query=
-
-
-content-hash)",
-            request);
+  const auto request = Utility::createCanonicalRequest(
+      "GET", "?query", headers, "content-hash", Utility::shouldNormalizeUriPath("vpc-lattice-svcs"),
+      Utility::useDoubleUriEncode("vpc-lattice-svcs"));
+  EXPECT_EQ("GET\n/\nquery=\n\n\ncontent-hash", request);
 }
 
 TEST(UtilityTest, CanonicalRequestWithHeaders) {
@@ -216,140 +219,82 @@ TEST(UtilityTest, CanonicalRequestWithHeaders) {
       {"header2", "value2"},
       {"header3", "value3"},
   };
-  const auto request =
-      Utility::createCanonicalRequest("appmesh", "GET", "", headers, "content-hash");
-  EXPECT_EQ(R"(GET
-/
-
-header1:value1
-header2:value2
-header3:value3
-
-header1;header2;header3
-content-hash)",
-            request);
+  const auto request = Utility::createCanonicalRequest(
+      "GET", "", headers, "content-hash", Utility::shouldNormalizeUriPath("vpc-lattice-svcs"),
+      Utility::useDoubleUriEncode("vpc-lattice-svcs"));
+  EXPECT_EQ(
+      "GET\n/"
+      "\n\nheader1:value1\nheader2:value2\nheader3:value3\n\nheader1;header2;header3\ncontent-hash",
+      request);
 }
 
-TEST(UtilityTest, CanonicalizePathStringReturnSlash) {
+TEST(UtilityTest, normalizePathReturnSlash) {
   const absl::string_view path = "";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  const auto canonical_path = Utility::normalizePath(path);
   EXPECT_EQ("/", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringSlash) {
+TEST(UtilityTest, normalizePathSlash) {
   const absl::string_view path = "/";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  const auto canonical_path = Utility::normalizePath(path);
   EXPECT_EQ("/", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringSlashes) {
+TEST(UtilityTest, normalizePathDotDotMultiple) {
+  const absl::string_view path = "/../../";
+  const auto canonical_path = Utility::normalizePath(path);
+  EXPECT_EQ("/", canonical_path);
+}
+
+TEST(UtilityTest, normalizePathSlashes) {
   const absl::string_view path = "///";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  const auto canonical_path = Utility::normalizePath(path);
   EXPECT_EQ("/", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringPrefixSlash) {
+TEST(UtilityTest, normalizePathPrefixSlash) {
   const absl::string_view path = "test";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  const auto canonical_path = Utility::normalizePath(path);
   EXPECT_EQ("/test", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringSuffixSlash) {
+TEST(UtilityTest, normalizePathSuffixSlash) {
   const absl::string_view path = "test/";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  const auto canonical_path = Utility::normalizePath(path);
   EXPECT_EQ("/test/", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringNormalizeSlash) {
+TEST(UtilityTest, normalizePathNormalizeSlash) {
   const absl::string_view path = "test////test///";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  const auto canonical_path = Utility::normalizePath(path);
   EXPECT_EQ("/test/test/", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringWithEncoding) {
+TEST(UtilityTest, normalizePathWithEncoding) {
   const absl::string_view path = "test$file.txt";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  auto canonical_path = Utility::normalizePath(path);
+  canonical_path = Utility::uriEncodePath(canonical_path);
   EXPECT_EQ("/test%24file.txt", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringWithEncodingSpaces) {
+TEST(UtilityTest, normalizePathWithEncodingSpaces) {
   const absl::string_view path = "/test and test/";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  auto canonical_path = Utility::normalizePath(path);
+  canonical_path = Utility::uriEncodePath(canonical_path);
   EXPECT_EQ("/test%20and%20test/", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizePathStringWithAlreadyEncodedSpaces) {
+TEST(UtilityTest, normalizePathWithAlreadyEncodedSpaces) {
   const absl::string_view path = "/test%20and%20test/";
-  const auto canonical_path = Utility::canonicalizePathString(path, "appmesh");
+  auto canonical_path = Utility::normalizePath(path);
+  canonical_path = Utility::uriEncodePath(canonical_path);
   EXPECT_EQ("/test%2520and%2520test/", canonical_path);
 }
 
-TEST(UtilityTest, CanonicalizeS3PathStringDoNotNormalizeSlash) {
-  const absl::string_view path = "/test//test///";
-  const auto canonical_path = Utility::canonicalizePathString(path, "s3");
-  EXPECT_EQ("/test//test///", canonical_path);
-}
-
-TEST(UtilityTest, CanonicalizeS3PathStringSlashes) {
-  const absl::string_view path = "///";
-  const auto canonical_path = Utility::canonicalizePathString(path, "s3");
-  EXPECT_EQ("///", canonical_path);
-}
-
-TEST(UtilityTest, CanonicalizeS3PathStringWithEncoding) {
-  const absl::string_view path = "/test$file.txt";
-  const auto canonical_path = Utility::canonicalizePathString(path, "s3");
-  EXPECT_EQ("/test%24file.txt", canonical_path);
-}
-
-TEST(UtilityTest, CanonicalizeS3PathStringWithEncodingSpaces) {
-  const absl::string_view path = "/test and test/";
-  const auto canonical_path = Utility::canonicalizePathString(path, "s3");
-  EXPECT_EQ("/test%20and%20test/", canonical_path);
-}
-
-TEST(UtilityTest, EncodePathSegment) {
+TEST(UtilityTest, uriEncodePath) {
   const absl::string_view path = "test^!@=-_~.";
-  const auto encoded_path = Utility::encodePathSegment(path, "appmesh");
+  const auto encoded_path = Utility::uriEncodePath(path);
   EXPECT_EQ("test%5E%21%40%3D-_~.", encoded_path);
-}
-
-TEST(UtilityTest, EncodeS3PathSegment) {
-  const absl::string_view path = "/test/^!@=/-_~.";
-  const auto encoded_path = Utility::encodePathSegment(path, "s3");
-  EXPECT_EQ("/test/%5E%21%40%3D/-_~.", encoded_path);
-}
-
-// We assume that by the time our path has reached encodePathSegment, it has already been uriEncoded
-// These tests validate that we do not doubly encode these
-TEST(UtilityTest, CheckDoubleEncodingS3) {
-  const absl::string_view path = "/test%20file";
-  const auto encoded_path = Utility::encodePathSegment(path, "s3");
-  EXPECT_EQ("/test%20file", encoded_path);
-}
-
-TEST(UtilityTest, CheckDoubleEncodingS3withSpace) {
-  const absl::string_view path = "/test file";
-  const auto encoded_path = Utility::encodePathSegment(path, "s3");
-  EXPECT_EQ("/test%20file", encoded_path);
-}
-
-TEST(UtilityTest, CheckDoubleEncodingS3Outposts) {
-  const absl::string_view path = "/test%20file";
-  const auto encoded_path = Utility::encodePathSegment(path, "s3-outposts");
-  EXPECT_EQ("/test%20file", encoded_path);
-}
-
-TEST(UtilityTest, CheckDoubleEncodingS3Folder) {
-  const absl::string_view path = "/test%20folder/test%20file";
-  const auto encoded_path = Utility::encodePathSegment(path, "s3");
-  EXPECT_EQ("/test%20folder/test%20file", encoded_path);
-}
-
-TEST(UtilityTest, CheckDoubleEncodingS3FolderPercentFile) {
-  const absl::string_view path = "/test%20folder/%25";
-  const auto encoded_path = Utility::encodePathSegment(path, "s3");
-  EXPECT_EQ("/test%20folder/%25", encoded_path);
 }
 
 TEST(UtilityTest, CanonicalizeQueryString) {
@@ -382,22 +327,28 @@ TEST(UtilityTest, CanonicalizeQueryStringWithPlus) {
   EXPECT_EQ("a=1%202", canonical_query);
 }
 
-TEST(UtilityTest, CanonicalizeQueryStringDoubleEncodeEquals) {
-  const absl::string_view query = "a=!.!=!";
+TEST(UtilityTest, CanonicalizeQueryStringWithPlusEncoded) {
+  const absl::string_view query = "a=1%2B2";
   const auto canonical_query = Utility::canonicalizeQueryString(query);
-  EXPECT_EQ("a=%21.%21%253D%21", canonical_query);
+  EXPECT_EQ("a=1%2B2", canonical_query);
+}
+
+TEST(UtilityTest, CanonicalizeQueryStringWithTilde) {
+  const absl::string_view query = "a=1%7E~2";
+  const auto canonical_query = Utility::canonicalizeQueryString(query);
+  EXPECT_EQ("a=1~~2", canonical_query);
 }
 
 TEST(UtilityTest, EncodeQuerySegment) {
   const absl::string_view query = "^!@/-_~.";
-  const auto encoded_query = Utility::encodeQueryParam(query);
+  const auto encoded_query = Utility::encodeQueryComponentPreservingPlus(query);
   EXPECT_EQ("%5E%21%40%2F-_~.", encoded_query);
 }
 
 TEST(UtilityTest, EncodeQuerySegmentReserved) {
   const absl::string_view query = "?=&";
-  const auto encoded_query = Utility::encodeQueryParam(query);
-  EXPECT_EQ("%3F%253D%26", encoded_query);
+  const auto encoded_query = Utility::encodeQueryComponentPreservingPlus(query);
+  EXPECT_EQ("%3F%3D%26", encoded_query);
 }
 
 TEST(UtilityTest, CanonicalizationFuzzTest) {
@@ -410,9 +361,9 @@ TEST(UtilityTest, CanonicalizationFuzzTest) {
       fuzz.push_back(j);
       for (unsigned char k = 32; k <= 126; k++) {
         fuzz.push_back(k);
-        Utility::encodePathSegment(fuzz, "s3");
-        Utility::canonicalizePathString(fuzz, "appmesh");
-        Utility::encodeQueryParam(fuzz);
+        Utility::uriEncodePath(fuzz);
+        Utility::normalizePath(fuzz);
+        Utility::encodeQueryComponentPreservingPlus(fuzz);
         Utility::canonicalizeQueryString(fuzz);
         fuzz.pop_back();
       }
@@ -490,21 +441,21 @@ TEST(UtilityTest, CreateStaticClusterSuccessEvenWithMissingPort) {
 TEST(UtilityTest, GetNormalAndFipsSTSEndpoints) {
   EXPECT_EQ("sts.ap-south-1.amazonaws.com", Utility::getSTSEndpoint("ap-south-1"));
   EXPECT_EQ("sts.some-new-region.amazonaws.com", Utility::getSTSEndpoint("some-new-region"));
-#ifdef ENVOY_SSL_FIPS
-  // Under FIPS mode the Envoy should fetch the credentials from FIPS the dedicated endpoints.
-  EXPECT_EQ("sts-fips.us-east-1.amazonaws.com", Utility::getSTSEndpoint("us-east-1"));
-  EXPECT_EQ("sts-fips.us-east-2.amazonaws.com", Utility::getSTSEndpoint("us-east-2"));
-  EXPECT_EQ("sts-fips.us-west-1.amazonaws.com", Utility::getSTSEndpoint("us-west-1"));
-  EXPECT_EQ("sts-fips.us-west-2.amazonaws.com", Utility::getSTSEndpoint("us-west-2"));
-  // Even if FIPS mode is enabled ca-central-1 doesn't have a dedicated fips endpoint yet.
-  EXPECT_EQ("sts.ca-central-1.amazonaws.com", Utility::getSTSEndpoint("ca-central-1"));
-#else
-  EXPECT_EQ("sts.us-east-1.amazonaws.com", Utility::getSTSEndpoint("us-east-1"));
-  EXPECT_EQ("sts.us-east-2.amazonaws.com", Utility::getSTSEndpoint("us-east-2"));
-  EXPECT_EQ("sts.us-west-1.amazonaws.com", Utility::getSTSEndpoint("us-west-1"));
-  EXPECT_EQ("sts.us-west-2.amazonaws.com", Utility::getSTSEndpoint("us-west-2"));
-  EXPECT_EQ("sts.ca-central-1.amazonaws.com", Utility::getSTSEndpoint("ca-central-1"));
-#endif
+  if (FIPS_mode() == 1) {
+    // Under FIPS mode the Envoy should fetch the credentials from FIPS the dedicated endpoints.
+    EXPECT_EQ("sts-fips.us-east-1.amazonaws.com", Utility::getSTSEndpoint("us-east-1"));
+    EXPECT_EQ("sts-fips.us-east-2.amazonaws.com", Utility::getSTSEndpoint("us-east-2"));
+    EXPECT_EQ("sts-fips.us-west-1.amazonaws.com", Utility::getSTSEndpoint("us-west-1"));
+    EXPECT_EQ("sts-fips.us-west-2.amazonaws.com", Utility::getSTSEndpoint("us-west-2"));
+    // Even if FIPS mode is enabled ca-central-1 doesn't have a dedicated fips endpoint yet.
+    EXPECT_EQ("sts.ca-central-1.amazonaws.com", Utility::getSTSEndpoint("ca-central-1"));
+  } else {
+    EXPECT_EQ("sts.us-east-1.amazonaws.com", Utility::getSTSEndpoint("us-east-1"));
+    EXPECT_EQ("sts.us-east-2.amazonaws.com", Utility::getSTSEndpoint("us-east-2"));
+    EXPECT_EQ("sts.us-west-1.amazonaws.com", Utility::getSTSEndpoint("us-west-1"));
+    EXPECT_EQ("sts.us-west-2.amazonaws.com", Utility::getSTSEndpoint("us-west-2"));
+    EXPECT_EQ("sts.ca-central-1.amazonaws.com", Utility::getSTSEndpoint("ca-central-1"));
+  }
 }
 
 // China regions: https://docs.aws.amazon.com/general/latest/gr/rande.html#sts_region.
@@ -522,16 +473,16 @@ TEST(UtilityTest, GetGovCloudSTSEndpoints) {
 
 // Test edge case where a SigV4a region set is provided and also web identity provider is in use
 TEST(UtilityTest, CorrectlyConvertRegionSet) {
-#ifdef ENVOY_SSL_FIPS
-  EXPECT_EQ("sts-fips.us-east-1.amazonaws.com", Utility::getSTSEndpoint("*"));
-  EXPECT_EQ("sts-fips.us-east-1.amazonaws.com", Utility::getSTSEndpoint("*,ap-southeast-2"));
-  EXPECT_EQ("sts-fips.us-east-1.amazonaws.com",
-            Utility::getSTSEndpoint("ca-central-*,ap-southeast-2"));
-#else
-  EXPECT_EQ("sts.amazonaws.com", Utility::getSTSEndpoint("*"));
-  EXPECT_EQ("sts.amazonaws.com", Utility::getSTSEndpoint("*,ap-southeast-2"));
-  EXPECT_EQ("sts.amazonaws.com", Utility::getSTSEndpoint("ca-central-*,ap-southeast-2"));
-#endif
+  if (FIPS_mode() == 1) {
+    EXPECT_EQ("sts-fips.us-east-1.amazonaws.com", Utility::getSTSEndpoint("*"));
+    EXPECT_EQ("sts-fips.us-east-1.amazonaws.com", Utility::getSTSEndpoint("*,ap-southeast-2"));
+    EXPECT_EQ("sts-fips.us-east-1.amazonaws.com",
+              Utility::getSTSEndpoint("ca-central-*,ap-southeast-2"));
+  } else {
+    EXPECT_EQ("sts.amazonaws.com", Utility::getSTSEndpoint("*"));
+    EXPECT_EQ("sts.amazonaws.com", Utility::getSTSEndpoint("*,ap-southeast-2"));
+    EXPECT_EQ("sts.amazonaws.com", Utility::getSTSEndpoint("ca-central-*,ap-southeast-2"));
+  }
   EXPECT_EQ("sts.ap-southeast-2.amazonaws.com",
             Utility::getSTSEndpoint("ap-southeast-2,us-east-2"));
   EXPECT_EQ("sts.ca-central-1.amazonaws.com",
@@ -539,7 +490,7 @@ TEST(UtilityTest, CorrectlyConvertRegionSet) {
 }
 
 TEST(UtilityTest, JsonStringFound) {
-  auto test_json = Json::Factory::loadFromStringNoThrow("{\"access_key_id\":\"testvalue\"}");
+  auto test_json = Json::Factory::loadFromString("{\"access_key_id\":\"testvalue\"}");
   EXPECT_TRUE(test_json.ok());
   const auto expiration =
       Utility::getStringFromJsonOrDefault(test_json.value(), "access_key_id", "notfound");
@@ -547,7 +498,7 @@ TEST(UtilityTest, JsonStringFound) {
 }
 
 TEST(UtilityTest, JsonStringNotFound) {
-  auto test_json = Json::Factory::loadFromStringNoThrow("{\"no_access_key_id\":\"testvalue\"}");
+  auto test_json = Json::Factory::loadFromString("{\"no_access_key_id\":\"testvalue\"}");
   EXPECT_TRUE(test_json.ok());
   const auto expiration =
       Utility::getStringFromJsonOrDefault(test_json.value(), "access_key_id", "notfound");
@@ -555,14 +506,14 @@ TEST(UtilityTest, JsonStringNotFound) {
 }
 
 TEST(UtilityTest, JsonIntegerFound) {
-  auto test_json = Json::Factory::loadFromStringNoThrow("{\"expiration\":5}");
+  auto test_json = Json::Factory::loadFromString("{\"expiration\":5}");
   EXPECT_TRUE(test_json.ok());
   const auto expiration = Utility::getIntegerFromJsonOrDefault(test_json.value(), "expiration", 0);
   EXPECT_EQ(expiration, 5);
 }
 
 TEST(UtilityTest, JsonIntegerNotFound) {
-  auto test_json = Json::Factory::loadFromStringNoThrow("{\"noexpiration\":5}");
+  auto test_json = Json::Factory::loadFromString("{\"noexpiration\":5}");
   EXPECT_TRUE(test_json.ok());
   const auto expiration = Utility::getIntegerFromJsonOrDefault(test_json.value(), "expiration", 0);
   // Should return default value
@@ -571,7 +522,7 @@ TEST(UtilityTest, JsonIntegerNotFound) {
 
 // Check we handle double formatted integer > 0
 TEST(UtilityTest, JsonIntegerExponent) {
-  auto test_json = Json::Factory::loadFromStringNoThrow("{\"expiration\":1.714449238E9}");
+  auto test_json = Json::Factory::loadFromString("{\"expiration\":1.714449238E9}");
   EXPECT_TRUE(test_json.ok());
   auto value_or_error = test_json.value()->getValue("expiration");
   EXPECT_TRUE(value_or_error.ok());
@@ -584,7 +535,7 @@ TEST(UtilityTest, JsonIntegerExponent) {
 
 // Check we handle double formatted integer < 0
 TEST(UtilityTest, JsonIntegerExponentInvalid) {
-  auto test_json = Json::Factory::loadFromStringNoThrow("{\"expiration\":-0.17144492389}");
+  auto test_json = Json::Factory::loadFromString("{\"expiration\":-0.17144492389}");
   EXPECT_TRUE(test_json.ok());
   auto value_or_error = test_json.value()->getValue("expiration");
   EXPECT_TRUE(value_or_error.ok());
@@ -594,6 +545,242 @@ TEST(UtilityTest, JsonIntegerExponentInvalid) {
       Utility::getIntegerFromJsonOrDefault(test_json.value(), "expiration", 9999);
   // Should return default value
   EXPECT_EQ(expiration, 9999);
+}
+
+TEST(UtilityTest, CheckNormalization) {
+  std::string service = "s3";
+  auto should_normalize = Utility::shouldNormalizeUriPath(service);
+  EXPECT_FALSE(should_normalize);
+  service = "s3-outposts";
+  should_normalize = Utility::shouldNormalizeUriPath(service);
+  EXPECT_FALSE(should_normalize);
+  service = "s3-express";
+  should_normalize = Utility::shouldNormalizeUriPath(service);
+  EXPECT_FALSE(should_normalize);
+  service = "vpc-lattice-svcs";
+  should_normalize = Utility::shouldNormalizeUriPath(service);
+  EXPECT_TRUE(should_normalize);
+  service = "lambda";
+  should_normalize = Utility::shouldNormalizeUriPath(service);
+  EXPECT_TRUE(should_normalize);
+}
+
+TEST(UtilityTest, RolesAnywhereEndpoint) {
+  std::string arn = "junkarn";
+  const bool fips_mode = FIPS_mode();
+
+  if (fips_mode) {
+    EXPECT_EQ("rolesanywhere-fips.us-east-1.amazonaws.com", Utility::getRolesAnywhereEndpoint(arn));
+  } else {
+    EXPECT_EQ("rolesanywhere.us-east-1.amazonaws.com", Utility::getRolesAnywhereEndpoint(arn));
+  }
+
+  arn = "arn:aws:rolesanywhere:ap-southeast-2:012345678901:trust-anchor/"
+        "8d105284-f0a7-4939-a7e6-8df768ea535f";
+  if (fips_mode) {
+    EXPECT_EQ("rolesanywhere.ap-southeast-2.amazonaws.com", Utility::getRolesAnywhereEndpoint(arn));
+  } else {
+    EXPECT_EQ("rolesanywhere.ap-southeast-2.amazonaws.com", Utility::getRolesAnywhereEndpoint(arn));
+  }
+
+  arn = "arn:aws:rolesanywhere:eu-west-1:randomjunk";
+  if (fips_mode) {
+    EXPECT_EQ("rolesanywhere.eu-west-1.amazonaws.com", Utility::getRolesAnywhereEndpoint(arn));
+  } else {
+    EXPECT_EQ("rolesanywhere.eu-west-1.amazonaws.com", Utility::getRolesAnywhereEndpoint(arn));
+  }
+}
+
+// Test that included_headers takes precedence over excluded_headers
+TEST(UtilityTest, IncludedHeadersTakesPrecedence) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  Http::TestRequestHeaderMapImpl headers{
+      {":authority", "example.com"}, {"custom-header", "value1"}, {"another-header", "value2"}};
+
+  std::vector<Matchers::StringMatcherPtr> excluded_headers = {};
+  envoy::type::matcher::v3::StringMatcher config;
+  config.set_prefix("custom");
+  excluded_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config, context));
+
+  std::vector<Matchers::StringMatcherPtr> included_headers = {};
+  envoy::type::matcher::v3::StringMatcher include_config;
+  include_config.set_exact("custom-header");
+  included_headers.emplace_back(
+      std::make_unique<Matchers::StringMatcherImpl>(include_config, context));
+
+  // When included_headers is set, excluded_headers should be ignored
+  const auto map = Utility::canonicalizeHeaders(headers, excluded_headers, included_headers);
+  EXPECT_THAT(map, ElementsAre(Pair("custom-header", "value1"), Pair("host", "example.com")));
+}
+
+// Test that x-amz-* headers are always included even with excluded_headers
+TEST(UtilityTest, RequiredHeadersNotExcluded) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  Http::TestRequestHeaderMapImpl headers{{":authority", "example.com"},
+                                         {"x-amz-date", "20130708T220855Z"},
+                                         {"x-amz-security-token", "token123"},
+                                         {"content-type", "application/json"},
+                                         {"custom-header", "value1"}};
+
+  std::vector<Matchers::StringMatcherPtr> excluded_headers = {};
+  // Try to exclude x-amz-* headers
+  envoy::type::matcher::v3::StringMatcher config1;
+  config1.set_prefix("x-amz");
+  excluded_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config1, context));
+  // Try to exclude content-type
+  envoy::type::matcher::v3::StringMatcher config2;
+  config2.set_exact("content-type");
+  excluded_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config2, context));
+  // Exclude custom-header
+  envoy::type::matcher::v3::StringMatcher config3;
+  config3.set_exact("custom-header");
+  excluded_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config3, context));
+
+  std::vector<Matchers::StringMatcherPtr> included_headers = {};
+
+  // x-amz-* and content-type should still be included even when excluded, custom-header should be
+  // excluded
+  const auto map = Utility::canonicalizeHeaders(headers, excluded_headers, included_headers);
+  EXPECT_THAT(map, ElementsAre(Pair("content-type", "application/json"),
+                               Pair("host", "example.com"), Pair("x-amz-date", "20130708T220855Z"),
+                               Pair("x-amz-security-token", "token123")));
+}
+
+// Test that x-amz-* headers are always included even with included_headers
+TEST(UtilityTest, RequiredHeadersAlwaysIncluded) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  Http::TestRequestHeaderMapImpl headers{{":authority", "example.com"},
+                                         {"x-amz-date", "20130708T220855Z"},
+                                         {"content-type", "application/json"},
+                                         {"custom-header", "value1"}};
+
+  std::vector<Matchers::StringMatcherPtr> excluded_headers = {};
+  std::vector<Matchers::StringMatcherPtr> included_headers = {};
+  // Only include custom-header
+  envoy::type::matcher::v3::StringMatcher config;
+  config.set_exact("custom-header");
+  included_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config, context));
+
+  // x-amz-* and content-type should be included automatically
+  const auto map = Utility::canonicalizeHeaders(headers, excluded_headers, included_headers);
+  EXPECT_THAT(map,
+              ElementsAre(Pair("content-type", "application/json"), Pair("custom-header", "value1"),
+                          Pair("host", "example.com"), Pair("x-amz-date", "20130708T220855Z")));
+}
+
+// Test included_headers with prefix matcher
+TEST(UtilityTest, IncludedHeadersWithPrefix) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  Http::TestRequestHeaderMapImpl headers{{":authority", "example.com"},
+                                         {"x-custom-1", "value1"},
+                                         {"x-custom-2", "value2"},
+                                         {"other-header", "value3"}};
+
+  std::vector<Matchers::StringMatcherPtr> excluded_headers = {};
+  std::vector<Matchers::StringMatcherPtr> included_headers = {};
+  envoy::type::matcher::v3::StringMatcher config;
+  config.set_prefix("x-custom");
+  included_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config, context));
+
+  // Only x-custom-* headers should be included (plus host)
+  const auto map = Utility::canonicalizeHeaders(headers, excluded_headers, included_headers);
+  EXPECT_THAT(map, ElementsAre(Pair("host", "example.com"), Pair("x-custom-1", "value1"),
+                               Pair("x-custom-2", "value2")));
+}
+
+// Test that content-type is case-insensitive for required header check
+TEST(UtilityTest, ContentTypeHeaderCaseInsensitive) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  Http::TestRequestHeaderMapImpl headers{{":authority", "example.com"},
+                                         {"Content-Type", "application/json"},
+                                         {"custom-header", "value1"}};
+
+  std::vector<Matchers::StringMatcherPtr> excluded_headers = {};
+  std::vector<Matchers::StringMatcherPtr> included_headers = {};
+  // Only include custom-header
+  envoy::type::matcher::v3::StringMatcher config;
+  config.set_exact("custom-header");
+  included_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config, context));
+
+  // Content-Type should be included automatically despite case difference
+  const auto map = Utility::canonicalizeHeaders(headers, excluded_headers, included_headers);
+  EXPECT_THAT(map, ElementsAre(Pair("content-type", "application/json"),
+                               Pair("custom-header", "value1"), Pair("host", "example.com")));
+}
+
+// Test x-amz-* prefix is case-insensitive for required header check
+TEST(UtilityTest, XAmzHeadersCaseInsensitive) {
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  Http::TestRequestHeaderMapImpl headers{{":authority", "example.com"},
+                                         {"X-Amz-Date", "20130708T220855Z"},
+                                         {"X-AMZ-Security-Token", "token123"},
+                                         {"custom-header", "value1"}};
+
+  std::vector<Matchers::StringMatcherPtr> excluded_headers = {};
+  std::vector<Matchers::StringMatcherPtr> included_headers = {};
+  // Only include custom-header
+  envoy::type::matcher::v3::StringMatcher config;
+  config.set_exact("custom-header");
+  included_headers.emplace_back(std::make_unique<Matchers::StringMatcherImpl>(config, context));
+
+  // X-Amz-* headers should be included automatically despite case difference
+  const auto map = Utility::canonicalizeHeaders(headers, excluded_headers, included_headers);
+  EXPECT_THAT(map, ElementsAre(Pair("custom-header", "value1"), Pair("host", "example.com"),
+                               Pair("x-amz-date", "20130708T220855Z"),
+                               Pair("x-amz-security-token", "token123")));
+}
+
+TEST(UtilityTest, IsUriPathEncodedAlreadyEncoded) {
+  EXPECT_TRUE(Utility::isUriPathEncoded("/path/to/file"));
+  EXPECT_TRUE(Utility::isUriPathEncoded("/path%20with%20spaces"));
+  EXPECT_TRUE(Utility::isUriPathEncoded("/path%2Fwith%2Fencoded%2Fslashes"));
+  EXPECT_TRUE(Utility::isUriPathEncoded("/file-name_test.txt~"));
+  EXPECT_TRUE(Utility::isUriPathEncoded("/path/with%21special%40chars"));
+  EXPECT_TRUE(Utility::isUriPathEncoded("/path/with%singlepercent"));
+}
+
+TEST(UtilityTest, IsUriPathEncodedNotEncoded) {
+  EXPECT_FALSE(Utility::isUriPathEncoded("/path with spaces"));
+  EXPECT_FALSE(Utility::isUriPathEncoded("/path/with special!chars"));
+  EXPECT_FALSE(Utility::isUriPathEncoded("/file@name.txt"));
+}
+
+// A raw (unencoded) path for S3 should be percent-encoded once
+TEST(UtilityTest, CanonicalRequestS3UnencodedPath) {
+  std::map<std::string, std::string> headers;
+  const auto request = Utility::createCanonicalRequest("GET", "/test@test", headers, "content-hash",
+                                                       Utility::shouldNormalizeUriPath("s3"),
+                                                       Utility::useDoubleUriEncode("s3"));
+  EXPECT_EQ("GET\n/test%40test\n\n\n\ncontent-hash", request);
+}
+
+// An already encoded path for S3 should be not be double-encoded
+TEST(UtilityTest, CanonicalRequestS3AlreadyEncodedPath) {
+  std::map<std::string, std::string> headers;
+  const auto request = Utility::createCanonicalRequest(
+      "GET", "/test%40test", headers, "content-hash", Utility::shouldNormalizeUriPath("s3"),
+      Utility::useDoubleUriEncode("s3"));
+  EXPECT_EQ("GET\n/test%40test\n\n\n\ncontent-hash", request);
+}
+
+// A raw (unencoded) path for lattice should be percent-encoded once
+TEST(UtilityTest, CanonicalRequestVpcLatticeUnencodedPath) {
+  std::map<std::string, std::string> headers;
+  const auto request =
+      Utility::createCanonicalRequest("GET", "/test@test", headers, "content-hash",
+                                      Utility::shouldNormalizeUriPath("vpc-lattice-svcs"),
+                                      Utility::useDoubleUriEncode("vpc-lattice-svcs"));
+  EXPECT_EQ("GET\n/test%40test\n\n\n\ncontent-hash", request);
+}
+
+// An already encoded path for lattice should be percent-encoded twice
+TEST(UtilityTest, CanonicalRequestVpcLatticeAlreadyEncodedPath) {
+  std::map<std::string, std::string> headers;
+  const auto request =
+      Utility::createCanonicalRequest("GET", "/test%40test", headers, "content-hash",
+                                      Utility::shouldNormalizeUriPath("vpc-lattice-svcs"),
+                                      Utility::useDoubleUriEncode("vpc-lattice-svcs"));
+  EXPECT_EQ("GET\n/test%2540test\n\n\n\ncontent-hash", request);
 }
 
 } // namespace

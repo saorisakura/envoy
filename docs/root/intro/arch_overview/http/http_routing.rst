@@ -32,6 +32,10 @@ Path, prefix and header matching
     and for more complex matching rules.
 
     Match routes according to :ref:`arbitrary headers <envoy_v3_api_msg_config.route.v3.HeaderMatcher>`.
+Cookie matching
+    Match based on specific HTTP cookies via
+    :ref:`cookies <envoy_v3_api_field_config.route.v3.RouteMatch.cookies>` without
+    parsing the ``Cookie`` header manually.
 Path, prefix and host rewriting
     Rewrite the :ref:`prefix <envoy_v3_api_field_config.route.v3.RedirectAction.prefix_rewrite>`, or
     :ref:`path using a regular expression and capture groups <envoy_v3_api_field_config.route.v3.RouteAction.regex_rewrite>`.
@@ -264,7 +268,7 @@ Envoy supports using a :ref:`generic match tree <arch_overview_matching_api>` to
 specify the route table.
 
 This is a more expressive matching engine than the original one, allowing
-for sublinear matching on arbitrary headers (unlike the original matching engine which could only
+for :ref:`sublinear matching <arch_overview_sublinear_routing>`  on arbitrary headers (unlike the original matching engine which could only
 do this for ``:authority`` in some cases).
 
 To use the generic matching tree, specify a matcher on a virtual host with a :ref:`Route <envoy_v3_api_msg_config.route.v3.Route>`

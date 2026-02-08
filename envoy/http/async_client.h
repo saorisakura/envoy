@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "envoy/buffer/buffer.h"
@@ -12,6 +14,7 @@
 #include "envoy/stream_info/filter_state.h"
 #include "envoy/stream_info/stream_info.h"
 #include "envoy/tracing/tracer.h"
+#include "envoy/upstream/load_balancer.h"
 
 #include "source/common/protobuf/protobuf.h"
 
@@ -47,6 +50,18 @@ public:
    * watermarks have gone below.
    */
   virtual void onSidestreamBelowLowWatermark() PURE;
+
+  /**
+    Sidestream subscribes to downstream watermark events on the downstream stream and downstream
+    connection.
+  */
+  virtual void addDownstreamWatermarkCallbacks(Http::DownstreamWatermarkCallbacks& callbacks) PURE;
+  /**
+    Sidestream stop subscribing to watermark events on the downstream stream and downstream
+    connection.
+   */
+  virtual void
+  removeDownstreamWatermarkCallbacks(Http::DownstreamWatermarkCallbacks& callbacks) PURE;
 };
 
 /**
@@ -312,7 +327,7 @@ public:
       account_ = account;
       return *this;
     }
-    StreamOptions& setBufferLimit(uint32_t limit) {
+    StreamOptions& setBufferLimit(uint64_t limit) {
       buffer_limit_ = limit;
       return *this;
     }
@@ -330,8 +345,8 @@ public:
     // The retry policy can be set as either a proto or Router::RetryPolicy but
     // not both. If both formats of the options are set, the more recent call
     // will overwrite the older one.
-    StreamOptions& setRetryPolicy(const Router::RetryPolicy& p) {
-      parsed_retry_policy = &p;
+    StreamOptions& setRetryPolicy(Router::RetryPolicyConstSharedPtr p) {
+      parsed_retry_policy = std::move(p);
       retry_policy = absl::nullopt;
       return *this;
     }
@@ -365,6 +380,23 @@ public:
     }
     StreamOptions& setSampled(absl::optional<bool> sampled) {
       sampled_ = sampled;
+      return *this;
+    }
+    StreamOptions& setSidestreamWatermarkCallbacks(SidestreamWatermarkCallbacks* callbacks) {
+      sidestream_watermark_callbacks = callbacks;
+      return *this;
+    }
+    StreamOptions& setOnDeleteCallbacksForTestOnly(std::function<void()> callback) {
+      on_delete_callback_for_test_only = callback;
+      return *this;
+    }
+    StreamOptions& setRemoteCloseTimeout(std::chrono::milliseconds timeout) {
+      remote_close_timeout = timeout;
+      return *this;
+    }
+    StreamOptions&
+    setUpstreamOverrideHost(const Upstream::LoadBalancerContext::OverrideHost& host) {
+      upstream_override_host_ = host;
       return *this;
     }
 
@@ -404,10 +436,10 @@ public:
     // Buffer memory account for tracking bytes.
     Buffer::BufferMemoryAccountSharedPtr account_{nullptr};
 
-    absl::optional<uint32_t> buffer_limit_;
+    absl::optional<uint64_t> buffer_limit_;
 
     absl::optional<envoy::config::route::v3::RetryPolicy> retry_policy;
-    const Router::RetryPolicy* parsed_retry_policy{nullptr};
+    Router::RetryPolicyConstSharedPtr parsed_retry_policy;
 
     Router::FilterConfigSharedPtr filter_config_;
 
@@ -425,6 +457,20 @@ public:
     std::string child_span_name_{""};
     // Sampling decision for the tracing span. The span is sampled by default.
     absl::optional<bool> sampled_{true};
+    // The pointer to sidestream watermark callbacks. Optional, nullptr by default.
+    Http::SidestreamWatermarkCallbacks* sidestream_watermark_callbacks = nullptr;
+
+    // The amount of tiem to wait for server to half-close its stream after client
+    // has half-closed its stream.
+    // Defaults to 1 second.
+    std::chrono::milliseconds remote_close_timeout{1000};
+
+    // This callback is invoked when AsyncStream object is deleted.
+    // Test only use to validate deferred deletion.
+    std::function<void()> on_delete_callback_for_test_only;
+
+    // Optional upstream override host for bypassing load balancer selection
+    absl::optional<Upstream::LoadBalancerContext::OverrideHost> upstream_override_host_;
   };
 
   /**

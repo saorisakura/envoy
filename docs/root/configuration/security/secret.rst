@@ -39,7 +39,7 @@ It follows the same protocol as other :ref:`xDS <xds_protocol>`.
 SDS Configuration
 -----------------
 
-:ref:`SdsSecretConfig <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.SdsSecretConfig>` is used to specify the secret. Its field *name* is a required field. If its *sds_config* field is empty, the *name* field specifies the secret in the bootstrap static_resource :ref:`secrets <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.StaticResources.secrets>`. Otherwise, it specifies the SDS server as :ref:`ConfigSource <envoy_v3_api_msg_config.core.v3.ConfigSource>`. Only gRPC is supported for the SDS service so its *api_config_source* must specify a **grpc_service**.
+:ref:`SdsSecretConfig <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.SdsSecretConfig>` is used to specify the secret. Its field *name* is a required field. If its *sds_config* field is empty, the *name* field specifies the secret in the bootstrap static_resource :ref:`secrets <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.StaticResources.secrets>`. Otherwise, it specifies the SDS server as :ref:`ConfigSource <envoy_v3_api_msg_config.core.v3.ConfigSource>`. When using a remote SDS service, the *api_config_source* must specify a **grpc_service** as only gRPC is supported.
 
 *SdsSecretConfig* is used in two fields in :ref:`CommonTlsContext <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.CommonTlsContext>`. The first field is *tls_certificate_sds_secret_configs* to use SDS to get :ref:`TlsCertificate <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.TlsCertificate>`. The second field is *validation_context_sds_secret_config* to use SDS to get :ref:`CertificateValidationContext <envoy_v3_api_msg_extensions.transport_sockets.tls.v3.CertificateValidationContext>`.
 
@@ -177,11 +177,13 @@ In contrast, :ref:`sds_server_example` requires a restart to reload xDS certific
             tls_certificate_sds_secret_configs:
               name: tls_sds
               sds_config:
-                path: /etc/envoy/tls_certificate_sds_secret.yaml
+                path_config_source:
+                  path: /etc/envoy/tls_certificate_sds_secret.yaml
             validation_context_sds_secret_config:
               name: validation_context_sds
               sds_config:
-                path: /etc/envoy/validation_context_sds_secret.yaml
+                path_config_source:
+                  path: /etc/envoy/validation_context_sds_secret.yaml
 
 Paths to client certificate, including client's certificate chain and private key are given in SDS config file ``/etc/envoy/tls_certificate_sds_secret.yaml``:
 
@@ -273,3 +275,144 @@ namespace. In addition, the following statistics are tracked in this namespace:
      :widths: 1, 2
 
      key_rotation_failed, Total number of filesystem key rotations that failed outside of an SDS update.
+
+On-demand certificates
+----------------------
+
+By default SDS certificate fetching blocks initialization of the listeners and the clusters that
+reference them. In some cases, it is preferable to accept connections without having the SDS secret
+and request the certificate on-demand using the peer hello message fields, such as SNI, to derive
+the secret name. This is useful for multi-tenant deployments, where a single listener or an upstream
+cluster can present a variety of certificates to the peer. Envoy provides an :ref:`on-demand
+certificate selector <extension_envoy.tls.certificate_selectors.on_demand_secret>` that pauses the
+TLS handshake to issue an SDS request for a certificate if not present, and then continues the
+handshake after receiving the response.
+
+A certificate obtained via the on-demand SDS is configured the same way as a regular TLS certificate
+defined in the context, e.g. all parent settings are applied. If there is a dynamic update to the
+parent TLS context, e.g. a validation context SDS update, on-demand certificate contexts also
+receive it and get updated. As a consequence, the handshake uses the latest version of the CA secret
+when resuming the handshake.
+
+On-demand SDS should be used with DELTA_GRPC to manage the deletion of the secrets from the data
+plane. A resource removal sent via the xDS response will cancel the data plane subscription for the
+specific secret name. When using the regular GRPC xDS protocol, the subscription for each mapped
+secret remains active until the removal of the parent resource (listener or cluster).
+
+In addition to the standard SDS `subscription statistics <subscription_statistics>`, the following
+statistics are produced by the on-demand certificate extension. For downstream listeners, they are
+in the *listener.<stat_prefix>.on_demand_secret.* namespace. For upstream clusters, the stat prefix
+is *cluster.<stat_prefix>.on_demand_secret.*.
+
+.. csv-table::
+     :header: Name, Type, Description
+     :widths: 1, 1, 2
+
+     cert_requested, Counter, Total number of new SDS subscriptions created
+     cert_updated, Counter, Total number of certificate updates
+     cert_active, Gauge, Number of active certificate subscriptions and certificates
+
+.. note::
+
+    Session resumption is currently not supported for on-demand certificates.
+
+Examples
+^^^^^^^^
+
+The following *downstream* TLS context configuration uses the SNI field as the secret name in the
+SDS request:
+
+.. validated-code-block:: yaml
+  :type-name: envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+
+  common_tls_context:
+    custom_tls_certificate_selector:
+      name: on-demand
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.cert_selectors.on_demand_secret.v3.Config
+        config_source:
+          api_config_source:
+            api_type: DELTA_GRPC
+            grpc_services:
+            - envoy_grpc:
+                cluster_name: some_xds_cluster
+        certificate_mapper:
+          name: sni
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.cert_mappers.sni.v3.SNI
+            default_value: "default_host"
+        # Starts fetching the secret prior to any requests.
+        prefetch_secret_names:
+        - default_host
+  disable_stateless_session_resumption: true
+  disable_stateful_session_resumption: true
+
+The following *downstream* TLS context configuration is analogous to the one with a regular SDS TLS
+certificate, but does not block the listener from listening until the SDS response arrives. Instead,
+connections are accepted and paused during the TLS handshake, and resumed once the certificate is
+received.
+
+.. validated-code-block:: yaml
+  :type-name: envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+
+  common_tls_context:
+    custom_tls_certificate_selector:
+      name: on-demand
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.cert_selectors.on_demand_secret.v3.Config
+        config_source:
+          api_config_source:
+            api_type: DELTA_GRPC
+            grpc_services:
+            - envoy_grpc:
+                cluster_name: some_xds_cluster
+        certificate_mapper:
+          name: sni
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.cert_mappers.static_name.v3.StaticName
+            name: secret_0
+        prefetch_secret_names:
+        - secret_0
+  disable_stateless_session_resumption: true
+  disable_stateful_session_resumption: true
+
+The following *upstream* TLS context configuration uses a dynamic filter state value passed from the
+downstream listener:
+
+.. validated-code-block:: yaml
+  :type-name: envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+
+  common_tls_context:
+    custom_tls_certificate_selector:
+      name: on-demand
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.cert_selectors.on_demand_secret.v3.Config
+        config_source:
+          api_config_source:
+            api_type: DELTA_GRPC
+            grpc_services:
+            - envoy_grpc:
+                cluster_name: some_xds_cluster
+        certificate_mapper:
+          name: filter_state_override
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.cert_mappers.filter_state_override.v3.Config
+            default_value: "default_secret"
+
+For the *upstream* filter state override configuraton above to work, the value must be written in
+the downstream filter chain, e.g. using the following filter configuration:
+
+.. validated-code-block:: yaml
+  :type-name: envoy.config.listener.v3.Filter
+
+  name: envoy.filters.network.set_filter_state
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.filters.network.set_filter_state.v3.Config
+    on_new_connection:
+    - object_key: envoy.tls.certificate_mappers.on_demand_secret
+      factory_key: envoy.hashable_string
+      format_string:
+        text_format_source:
+          inline_string: my_secret_name
+      shared_with_upstream: ONCE
+

@@ -14,6 +14,7 @@ envoy_cc_library(
     hdrs = ["profiler.h"],
     tcmalloc_dep = 1,
     deps = [
-        "@com_google_absl//absl/status:statusor",
+        "//source/common/common:thread_lib",
+        "@abseil-cpp//absl/status:statusor",
     ],
 )

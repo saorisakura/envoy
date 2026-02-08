@@ -17,6 +17,7 @@
 #include "source/common/common/logger.h"
 #include "source/common/grpc/codec.h"
 #include "source/common/http/codec_client.h"
+#include "source/common/http/response_decoder_impl_base.h"
 #include "source/common/router/header_parser.h"
 #include "source/common/stream_info/stream_info_impl.h"
 #include "source/common/upstream/health_checker_impl.h"
@@ -77,7 +78,7 @@ public:
 
 private:
   struct HttpActiveHealthCheckSession : public ActiveHealthCheckSession,
-                                        public Http::ResponseDecoder,
+                                        public Http::ResponseDecoderImplBase,
                                         public Http::StreamCallbacks {
     HttpActiveHealthCheckSession(HttpHealthCheckerImpl& parent, const HostSharedPtr& host);
     ~HttpActiveHealthCheckSession() override;
@@ -141,14 +142,7 @@ private:
     Http::CodecClientPtr client_;
     Http::ResponseHeaderMapPtr response_headers_;
     Buffer::InstancePtr response_body_;
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdangling-reference"
-#endif
     const std::string& hostname_;
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
     Network::ConnectionInfoProviderSharedPtr local_connection_info_provider_;
     // Keep small members (bools and enums) at the end of class, to reduce alignment overhead.
     const Http::Protocol protocol_;
@@ -173,11 +167,11 @@ private:
 
   const std::string path_;
   const std::string host_value_;
+  Buffer::OwnedImpl request_payload_;
   PayloadMatcher::MatchSegments receive_bytes_;
   const envoy::config::core::v3::RequestMethod method_;
   uint64_t response_buffer_size_;
-  absl::optional<Matchers::StringMatcherImpl<envoy::type::matcher::v3::StringMatcher>>
-      service_name_matcher_;
+  absl::optional<Matchers::StringMatcherImpl> service_name_matcher_;
   Router::HeaderParserPtr request_headers_parser_;
   const HttpStatusChecker http_status_checker_;
 

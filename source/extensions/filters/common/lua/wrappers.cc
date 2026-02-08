@@ -57,7 +57,8 @@ int BufferWrapper::luaGetBytes(lua_State* state) {
     luaL_error(state, "index/length must be >= 0 and (index + length) must be <= buffer size");
   }
 
-  // TODO(mattklein123): Reduce copies here by using Lua direct buffer builds.
+  // Note: Lua buffer API (`luaL_prepbuffsize`) could reduce copies here, but Envoy
+  // uses luajit which does not expose this function.
   std::unique_ptr<char[]> data(new char[length]);
   data_.copyOut(index, length, data.get());
   lua_pushlstring(state, data.get(), length);
@@ -66,30 +67,31 @@ int BufferWrapper::luaGetBytes(lua_State* state) {
 
 int BufferWrapper::luaSetBytes(lua_State* state) {
   data_.drain(data_.length());
+  ASSERT(data_.length() == 0); // Defensive check.
   absl::string_view bytes = getStringViewFromLuaString(state, 2);
+  headers_.setContentLength(bytes.size());
   data_.add(bytes);
-  headers_.setContentLength(data_.length());
   lua_pushnumber(state, data_.length());
   return 1;
 }
 
-void MetadataMapHelper::setValue(lua_State* state, const ProtobufWkt::Value& value) {
-  ProtobufWkt::Value::KindCase kind = value.kind_case();
+void MetadataMapHelper::setValue(lua_State* state, const Protobuf::Value& value) {
+  Protobuf::Value::KindCase kind = value.kind_case();
 
   switch (kind) {
-  case ProtobufWkt::Value::kNullValue:
+  case Protobuf::Value::kNullValue:
     return lua_pushnil(state);
-  case ProtobufWkt::Value::kNumberValue:
+  case Protobuf::Value::kNumberValue:
     return lua_pushnumber(state, value.number_value());
-  case ProtobufWkt::Value::kBoolValue:
+  case Protobuf::Value::kBoolValue:
     return lua_pushboolean(state, value.bool_value());
-  case ProtobufWkt::Value::kStructValue:
+  case Protobuf::Value::kStructValue:
     return createTable(state, value.struct_value().fields());
-  case ProtobufWkt::Value::kStringValue: {
+  case Protobuf::Value::kStringValue: {
     const auto& string_value = value.string_value();
     return lua_pushlstring(state, string_value.data(), string_value.size());
   }
-  case ProtobufWkt::Value::kListValue: {
+  case Protobuf::Value::kListValue: {
     const auto& list = value.list_value();
     const int values_size = list.values_size();
 
@@ -111,13 +113,13 @@ void MetadataMapHelper::setValue(lua_State* state, const ProtobufWkt::Value& val
     }
     return;
   }
-  case ProtobufWkt::Value::KIND_NOT_SET:
+  case Protobuf::Value::KIND_NOT_SET:
     PANIC("not implemented");
   }
 }
 
 void MetadataMapHelper::createTable(lua_State* state,
-                                    const Protobuf::Map<std::string, ProtobufWkt::Value>& fields) {
+                                    const Protobuf::Map<std::string, Protobuf::Value>& fields) {
   lua_createtable(state, 0, fields.size());
   for (const auto& field : fields) {
     int top = lua_gettop(state);
@@ -128,17 +130,17 @@ void MetadataMapHelper::createTable(lua_State* state,
 }
 
 /**
- * Converts the value on top of the Lua stack into a ProtobufWkt::Value.
+ * Converts the value on top of the Lua stack into a Protobuf::Value.
  * Any Lua types that cannot be directly mapped to Value types will
  * yield an error.
  */
-ProtobufWkt::Value MetadataMapHelper::loadValue(lua_State* state) {
-  ProtobufWkt::Value value;
+Protobuf::Value MetadataMapHelper::loadValue(lua_State* state) {
+  Protobuf::Value value;
   int type = lua_type(state, -1);
 
   switch (type) {
   case LUA_TNIL:
-    value.set_null_value(ProtobufWkt::NullValue());
+    value.set_null_value(Protobuf::NullValue());
     break;
   case LUA_TNUMBER:
     value.set_number_value(static_cast<double>(lua_tonumber(state, -1)));
@@ -190,8 +192,8 @@ int MetadataMapHelper::tableLength(lua_State* state) {
   return static_cast<int>(max);
 }
 
-ProtobufWkt::ListValue MetadataMapHelper::loadList(lua_State* state, int length) {
-  ProtobufWkt::ListValue list;
+Protobuf::ListValue MetadataMapHelper::loadList(lua_State* state, int length) {
+  Protobuf::ListValue list;
 
   for (int i = 1; i <= length; i++) {
     lua_rawgeti(state, -1, i);
@@ -202,8 +204,8 @@ ProtobufWkt::ListValue MetadataMapHelper::loadList(lua_State* state, int length)
   return list;
 }
 
-ProtobufWkt::Struct MetadataMapHelper::loadStruct(lua_State* state) {
-  ProtobufWkt::Struct struct_obj;
+Protobuf::Struct MetadataMapHelper::loadStruct(lua_State* state) {
+  Protobuf::Struct struct_obj;
 
   lua_pushnil(state);
   while (lua_next(state, -2) != 0) {
@@ -257,6 +259,17 @@ int MetadataMapWrapper::luaPairs(lua_State* state) {
   return 1;
 }
 
+int ParsedX509NameWrapper::luaCommonName(lua_State* state) {
+  const std::string& commonName = parsed_name_.commonName_;
+  lua_pushlstring(state, commonName.data(), commonName.size());
+  return 1;
+}
+
+int ParsedX509NameWrapper::luaOrganizationName(lua_State* state) {
+  createLuaTableFromStringList(state, parsed_name_.organizationName_);
+  return 1;
+}
+
 int SslConnectionWrapper::luaPeerCertificatePresented(lua_State* state) {
   lua_pushboolean(state, connection_info_.peerCertificatePresented());
   return 1;
@@ -296,6 +309,21 @@ int SslConnectionWrapper::luaSubjectPeerCertificate(lua_State* state) {
   return 1;
 }
 
+int SslConnectionWrapper::luaParsedSubjectPeerCertificate(lua_State* state) {
+  auto parsed_name = connection_info_.parsedSubjectPeerCertificate();
+  if (parsed_name.has_value()) {
+    if (parsed_subject_peer_certificate_.get() != nullptr) {
+      parsed_subject_peer_certificate_.pushStack();
+    } else {
+      parsed_subject_peer_certificate_.reset(
+          ParsedX509NameWrapper::create(state, parsed_name.ref()), true);
+    }
+  } else {
+    lua_pushnil(state);
+  }
+  return 1;
+}
+
 int SslConnectionWrapper::luaUriSanPeerCertificate(lua_State* state) {
   createLuaTableFromStringList(state, connection_info_.uriSanPeerCertificate());
   return 1;
@@ -314,6 +342,16 @@ int SslConnectionWrapper::luaDnsSansPeerCertificate(lua_State* state) {
 
 int SslConnectionWrapper::luaDnsSansLocalCertificate(lua_State* state) {
   createLuaTableFromStringList(state, connection_info_.dnsSansLocalCertificate());
+  return 1;
+}
+
+int SslConnectionWrapper::luaOidsPeerCertificate(lua_State* state) {
+  createLuaTableFromStringList(state, connection_info_.oidsPeerCertificate());
+  return 1;
+}
+
+int SslConnectionWrapper::luaOidsLocalCertificate(lua_State* state) {
+  createLuaTableFromStringList(state, connection_info_.oidsLocalCertificate());
   return 1;
 }
 
@@ -366,7 +404,10 @@ int SslConnectionWrapper::luaTlsVersion(lua_State* state) {
 }
 
 int ConnectionWrapper::luaSsl(lua_State* state) {
-  const auto& ssl = connection_->ssl();
+  ENVOY_LOG_MISC(warn, "connection():ssl() is deprecated and will be removed in a future release. "
+                       "Use streamInfo():downstreamSslConnection() instead.");
+
+  const auto& ssl = stream_info_.downstreamAddressProvider().sslConnection();
   if (ssl != nullptr) {
     if (ssl_connection_wrapper_.get() != nullptr) {
       ssl_connection_wrapper_.pushStack();

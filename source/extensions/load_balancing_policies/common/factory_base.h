@@ -2,13 +2,14 @@
 
 #include <memory>
 
+#include "envoy/server/factory_context.h"
 #include "envoy/upstream/load_balancer.h"
 
 #include "source/common/upstream/load_balancer_factory_base.h"
 
 namespace Envoy {
 namespace Extensions {
-namespace LoadBalancingPolices {
+namespace LoadBalancingPolicies {
 namespace Common {
 
 template <class ProtoType, class Impl>
@@ -108,6 +109,6 @@ private:
 };
 
 } // namespace Common
-} // namespace LoadBalancingPolices
+} // namespace LoadBalancingPolicies
 } // namespace Extensions
 } // namespace Envoy

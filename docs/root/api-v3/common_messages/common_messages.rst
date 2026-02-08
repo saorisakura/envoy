@@ -10,15 +10,18 @@ Common messages
   ../service/discovery/v3/discovery.proto
   ../extensions/filters/common/fault/v3/fault.proto
   ../config/core/v3/base.proto
+  ../config/core/v3/cel.proto
   ../extensions/filters/common/matcher/action/v3/skip_action.proto
   ../extensions/matching/common_inputs/network/v3/network_inputs.proto
   ../extensions/common/ratelimit/v3/ratelimit.proto
+  ../extensions/matching/common_inputs/stats/v3/stats.proto
   ../extensions/matching/common_inputs/ssl/v3/ssl_inputs.proto
   ../config/core/v3/config_source.proto
   ../extensions/matching/input_matchers/consistent_hashing/v3/consistent_hashing.proto
   ../extensions/network/socket_interface/v3/default_socket_interface.proto
   ../extensions/matching/common_inputs/environment_variable/v3/input.proto
   ../config/core/v3/extension.proto
+  ../extensions/common/aws/v3/credential_provider.proto
   ../extensions/common/matching/v3/extension_matcher.proto
   ../extensions/filters/common/dependency/v3/dependency.proto
   ../extensions/regex_engines/v3/google_re2.proto
@@ -42,3 +45,4 @@ Common messages
   ../config/core/v3/udp_socket_config.proto
   ../extensions/filters/common/set_filter_state/v3/value.proto
   ../config/core/v3/socket_cmsg_headers.proto
+  ../extensions/dynamic_modules/v3/dynamic_modules.proto

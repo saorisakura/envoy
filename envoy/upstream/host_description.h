@@ -16,9 +16,15 @@
 #include "envoy/upstream/resource_manager.h"
 
 #include "absl/strings/string_view.h"
+#include "xds/data/orca/v3/orca_load_report.pb.h"
 
 namespace Envoy {
+namespace StreamInfo {
+class StreamInfo;
+} // namespace StreamInfo
 namespace Upstream {
+
+using OrcaLoadReport = xds::data::orca::v3::OrcaLoadReport;
 
 using MetadataConstSharedPtr = std::shared_ptr<const envoy::config::core::v3::Metadata>;
 
@@ -83,6 +89,32 @@ public:
   // Returns an owning pointer to the current load metrics and clears the map.
   virtual StatMapPtr latch() PURE;
 };
+
+/**
+ * Base interface for attaching LbPolicy-specific data to individual hosts.
+ * This allows LbPolicy implementations to store per-host data that is used
+ * to make load balancing decisions.
+ */
+class HostLbPolicyData {
+public:
+  virtual ~HostLbPolicyData() = default;
+
+  /**
+   * Invoked when a new orca report is received for this upstream host to
+   * update the host lb policy data.
+   * NOTE: this method may be called concurrently from multiple threads.
+   * Please ensure that the implementation is thread-safe.
+   *
+   * @param report supplies the ORCA load report of this upstream host.
+   * @param stream_info supplies the downstream stream info.
+   */
+  virtual absl::Status onOrcaLoadReport(const OrcaLoadReport& /*report*/,
+                                        const StreamInfo::StreamInfo& /*stream_info*/) {
+    return absl::OkStatus();
+  }
+};
+
+using HostLbPolicyDataPtr = std::unique_ptr<HostLbPolicyData>;
 
 class ClusterInfo;
 
@@ -241,12 +273,46 @@ public:
    */
   virtual void setLastHcPassTime(MonotonicTime last_hc_pass_time) PURE;
 
-  virtual Network::UpstreamTransportSocketFactory&
-  resolveTransportSocketFactory(const Network::Address::InstanceConstSharedPtr& dest_address,
-                                const envoy::config::core::v3::Metadata* metadata) const PURE;
+  /**
+   * Resolve the transport socket factory to use for connections to this host.
+   * @param dest_address the destination address for the connection.
+   * @param metadata optional endpoint metadata for matching.
+   * @param transport_socket_options optional transport socket options containing
+   *        filter state shared from downstream for per-connection matching.
+   * @return the resolved transport socket factory.
+   */
+  virtual Network::UpstreamTransportSocketFactory& resolveTransportSocketFactory(
+      const Network::Address::InstanceConstSharedPtr& dest_address,
+      const envoy::config::core::v3::Metadata* metadata,
+      Network::TransportSocketOptionsConstSharedPtr transport_socket_options = nullptr) const PURE;
+
+  /**
+   * Set load balancing policy related data to the host.
+   * NOTE: this method should only be called at main thread before the host is used
+   * across worker threads.
+   */
+  virtual void setLbPolicyData(HostLbPolicyDataPtr lb_policy_data) PURE;
+
+  /**
+   * Get the load balancing policy related data of the host.
+   * @return the optional reference to the load balancing policy related data of the host.
+   * Non-const reference is returned to allow the caller to modify the data if needed.
+   * NOTE: the update to the data may be done at multiple threads concurrently and the caller
+   * should ensure the thread safety of the data.
+   */
+  virtual OptRef<HostLbPolicyData> lbPolicyData() const PURE;
+
+  /**
+   * Get the typed load balancing policy related data of the host.
+   * @return the optional reference to the typed load balancing policy related data of the host.
+   */
+  template <class HostLbPolicyDataType> OptRef<HostLbPolicyDataType> typedLbPolicyData() const {
+    return makeOptRefFromPtr(dynamic_cast<HostLbPolicyDataType*>(lbPolicyData().ptr()));
+  }
 };
 
 using HostDescriptionConstSharedPtr = std::shared_ptr<const HostDescription>;
+using HostDescriptionOptConstRef = OptRef<const Upstream::HostDescription>;
 
 #define ALL_TRANSPORT_SOCKET_MATCH_STATS(COUNTER) COUNTER(total_match_count)
 
@@ -276,15 +342,26 @@ public:
    * Resolve the transport socket configuration for a particular host.
    * @param endpoint_metadata the metadata of the given host.
    * @param locality_metadata the metadata of the host's locality.
+   * @param transport_socket_options optional transport socket options from downstream connection
+   *        that may contain SNI, ALPN, filter state, and other connection-specific data for
+   *        transport socket selection.
    * @return the match information of the transport socket selected.
    */
-  virtual MatchData resolve(const envoy::config::core::v3::Metadata* endpoint_metadata,
-                            const envoy::config::core::v3::Metadata* locality_metadata) const PURE;
+  virtual MatchData resolve(
+      const envoy::config::core::v3::Metadata* endpoint_metadata,
+      const envoy::config::core::v3::Metadata* locality_metadata,
+      Network::TransportSocketOptionsConstSharedPtr transport_socket_options = nullptr) const PURE;
 
-  /*
-   * return true if all matches support ALPN, false otherwise.
+  /**
+   * @return true if all matches support ALPN, false otherwise.
    */
   virtual bool allMatchesSupportAlpn() const PURE;
+
+  /**
+   * @return true if the matcher uses filter state for transport socket selection. When true,
+   *         transport socket resolution must be done per-connection with transport_socket_options.
+   */
+  virtual bool usesFilterState() const PURE;
 };
 
 using TransportSocketMatcherPtr = std::unique_ptr<TransportSocketMatcher>;

@@ -107,6 +107,20 @@ void Stats::dumpStatsToLog() {
 #endif
 }
 
+absl::optional<std::string> Stats::dumpStats() {
+#if defined(TCMALLOC)
+  return tcmalloc::MallocExtension::GetStats();
+#elif defined(GPERFTOOLS_TCMALLOC)
+  constexpr int buffer_size = 100000;
+  std::string buffer(buffer_size, '\0');
+  MallocExtension::instance()->GetStats(buffer.data(), buffer_size);
+  buffer.resize(strlen(buffer.c_str()));
+  return buffer;
+#else
+  return absl::nullopt;
+#endif
+}
+
 AllocatorManager::AllocatorManager(
     Api::Api& api, Envoy::Stats::Scope& scope,
     const envoy::config::bootstrap::v3::MemoryAllocatorManager& config)
@@ -116,15 +130,7 @@ AllocatorManager::AllocatorManager(
       allocator_manager_stats_(MemoryAllocatorManagerStats{
           MEMORY_ALLOCATOR_MANAGER_STATS(POOL_COUNTER_PREFIX(scope, "tcmalloc."))}),
       api_(api) {
-#if defined(GPERFTOOLS_TCMALLOC)
-  if (bytes_to_release_ > 0) {
-    ENVOY_LOG_MISC(error,
-                   "Memory releasing is not supported for gperf tcmalloc, no memory releasing "
-                   "will be configured.");
-  }
-#elif defined(TCMALLOC)
   configureBackgroundMemoryRelease();
-#endif
 };
 
 AllocatorManager::~AllocatorManager() {
@@ -150,6 +156,13 @@ void AllocatorManager::tcmallocRelease() {
  * has been initialized to `0`, no heap memory will be released in background.
  */
 void AllocatorManager::configureBackgroundMemoryRelease() {
+#if defined(GPERFTOOLS_TCMALLOC)
+  if (bytes_to_release_ > 0) {
+    ENVOY_LOG_MISC(error,
+                   "Memory releasing is not supported for gperf tcmalloc, no memory releasing "
+                   "will be configured.");
+  }
+#elif defined(TCMALLOC)
   ENVOY_BUG(!tcmalloc_thread_, "Invalid state, tcmalloc has already been initialised");
   if (bytes_to_release_ > 0) {
     tcmalloc_routine_dispatcher_ = api_.allocateDispatcher(std::string(TCMALLOC_ROUTINE_THREAD_ID));
@@ -178,6 +191,7 @@ void AllocatorManager::configureBackgroundMemoryRelease() {
                   "Configured tcmalloc with background release rate: {} bytes per {} milliseconds",
                   bytes_to_release_, memory_release_interval_msec_.count()));
   }
+#endif
 }
 
 } // namespace Memory

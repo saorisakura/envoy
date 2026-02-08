@@ -12,6 +12,7 @@
 // * Idle/drain timeouts.
 // * HTTP 1.0 special cases
 // * Fuzz config settings
+#include <algorithm>
 #include <chrono>
 
 #include "envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.pb.h"
@@ -76,16 +77,10 @@ public:
     encoder_filter_ = new NiceMock<MockStreamEncoderFilter>();
 
     EXPECT_CALL(filter_factory_, createFilterChain(_))
-        .WillOnce(Invoke([this](FilterChainManager& manager) -> bool {
-          FilterFactoryCb decoder_filter_factory = [this](FilterChainFactoryCallbacks& callbacks) {
-            callbacks.addStreamDecoderFilter(StreamDecoderFilterSharedPtr{decoder_filter_});
-          };
-          FilterFactoryCb encoder_filter_factory = [this](FilterChainFactoryCallbacks& callbacks) {
-            callbacks.addStreamEncoderFilter(StreamEncoderFilterSharedPtr{encoder_filter_});
-          };
-
-          manager.applyFilterFactoryCb({}, decoder_filter_factory);
-          manager.applyFilterFactoryCb({}, encoder_filter_factory);
+        .WillOnce(Invoke([this](FilterChainFactoryCallbacks& callbacks) -> bool {
+          callbacks.setFilterConfigName("");
+          callbacks.addStreamDecoderFilter(StreamDecoderFilterSharedPtr{decoder_filter_});
+          callbacks.addStreamEncoderFilter(StreamEncoderFilterSharedPtr{encoder_filter_});
           return true;
         }));
     EXPECT_CALL(*decoder_filter_, setDecoderFilterCallbacks(_))
@@ -94,12 +89,11 @@ public:
           callbacks.streamInfo().setResponseCodeDetails("");
         }));
     EXPECT_CALL(*encoder_filter_, setEncoderFilterCallbacks(_));
-    EXPECT_CALL(filter_factory_, createUpgradeFilterChain(_, _, _, _))
-        .WillRepeatedly(
-            Invoke([&](absl::string_view, const Http::FilterChainFactory::UpgradeMap*,
-                       FilterChainManager& manager, const Http::FilterChainOptions&) -> bool {
-              return filter_factory_.createFilterChain(manager);
-            }));
+    EXPECT_CALL(filter_factory_, createUpgradeFilterChain(_, _, _))
+        .WillRepeatedly(Invoke([&](absl::string_view, const Http::FilterChainFactory::UpgradeMap*,
+                                   FilterChainFactoryCallbacks& callbacks) -> bool {
+          return filter_factory_.createFilterChain(callbacks);
+        }));
   }
 
   Http::ForwardClientCertType
@@ -128,7 +122,7 @@ public:
 
   // Http::ConnectionManagerConfig
   const RequestIDExtensionSharedPtr& requestIDExtension() override { return request_id_extension_; }
-  const std::list<AccessLog::InstanceSharedPtr>& accessLogs() override { return access_logs_; }
+  const AccessLog::InstanceSharedPtrVector& accessLogs() override { return access_logs_; }
   bool flushAccessLogOnNewRequest() override { return flush_access_log_on_new_request_; }
   bool flushAccessLogOnTunnelSuccessfullyEstablished() const override {
     return flush_access_log_on_tunnel_successfully_established_;
@@ -160,6 +154,9 @@ public:
     return max_stream_duration_;
   }
   std::chrono::milliseconds streamIdleTimeout() const override { return stream_idle_timeout_; }
+  absl::optional<std::chrono::milliseconds> streamFlushTimeout() const override {
+    return stream_flush_timeout_;
+  }
   std::chrono::milliseconds requestTimeout() const override { return request_timeout_; }
   std::chrono::milliseconds requestHeadersTimeout() const override {
     return request_headers_timeout_;
@@ -203,6 +200,9 @@ public:
   const std::vector<Http::ClientCertDetailsType>& setCurrentClientCertDetails() const override {
     return set_current_client_cert_details_;
   }
+  const Matcher::MatchTreePtr<Http::HttpMatchingData>& forwardClientCertMatcher() const override {
+    return forward_client_cert_matcher_;
+  }
   const Network::Address::Instance& localAddress() override { return local_address_; }
   const absl::optional<std::string>& userAgent() override { return user_agent_; }
   Tracing::TracerSharedPtr tracer() override { return tracer_; }
@@ -235,7 +235,7 @@ public:
   const std::vector<Http::EarlyHeaderMutationPtr>& earlyHeaderMutationExtensions() const override {
     return early_header_mutations_;
   }
-  uint64_t maxRequestsPerConnection() const override { return 0; }
+  uint32_t maxRequestsPerConnection() const override { return 0; }
   const HttpConnectionManagerProto::ProxyStatusConfig* proxyStatusConfig() const override {
     return proxy_status_config_.get();
   }
@@ -247,12 +247,20 @@ public:
   bool appendLocalOverload() const override { return false; }
   bool appendXForwardedPort() const override { return false; }
   bool addProxyProtocolConnectionState() const override { return true; }
+  const absl::flat_hash_set<uint32_t>& httpsDestinationPorts() const override {
+    return https_destination_ports_;
+  }
+  const absl::flat_hash_set<uint32_t>& httpDestinationPorts() const override {
+    return http_destination_ports_;
+  }
 
   const envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager
       config_;
+  absl::flat_hash_set<uint32_t> https_destination_ports_;
+  absl::flat_hash_set<uint32_t> http_destination_ports_;
   NiceMock<Random::MockRandomGenerator> random_;
   RequestIDExtensionSharedPtr request_id_extension_;
-  std::list<AccessLog::InstanceSharedPtr> access_logs_;
+  AccessLog::InstanceSharedPtrVector access_logs_;
   bool flush_access_log_on_new_request_ = false;
   bool flush_access_log_on_tunnel_successfully_established_ = false;
   absl::optional<std::chrono::milliseconds> access_log_flush_interval_;
@@ -282,12 +290,14 @@ public:
   bool http1_safe_max_connection_duration_{false};
   absl::optional<std::chrono::milliseconds> max_stream_duration_;
   std::chrono::milliseconds stream_idle_timeout_{};
+  std::chrono::milliseconds stream_flush_timeout_{};
   std::chrono::milliseconds request_timeout_{};
   std::chrono::milliseconds request_headers_timeout_{};
   std::chrono::milliseconds delayed_close_timeout_{};
   bool use_remote_address_{true};
   Http::ForwardClientCertType forward_client_cert_;
   std::vector<Http::ClientCertDetailsType> set_current_client_cert_details_;
+  Matcher::MatchTreePtr<Http::HttpMatchingData> forward_client_cert_matcher_;
   Network::Address::Ipv4Instance local_address_{"127.0.0.1"};
   absl::optional<std::string> user_agent_;
   Tracing::TracerSharedPtr tracer_{std::make_shared<NiceMock<Tracing::MockTracer>>()};
@@ -299,7 +309,7 @@ public:
   Http::DefaultInternalAddressConfig internal_address_config_;
   bool normalize_path_{true};
   LocalReply::LocalReplyPtr local_reply_;
-  std::vector<Http::OriginalIPDetectionSharedPtr> ip_detection_extensions_{};
+  std::vector<Http::OriginalIPDetectionSharedPtr> ip_detection_extensions_;
   std::vector<Http::EarlyHeaderMutationPtr> early_header_mutations_;
   std::unique_ptr<HttpConnectionManagerProto::ProxyStatusConfig> proxy_status_config_;
 };
@@ -482,7 +492,7 @@ public:
       break;
     }
     case test::common::http::RequestAction::kContinueDecoding: {
-      if (!decoding_done_ &&
+      if (!decoding_done_ && state != StreamState::Closed &&
           (header_status_ == FilterHeadersStatus::StopAllIterationAndBuffer ||
            header_status_ == FilterHeadersStatus::StopAllIterationAndWatermark ||
            header_status_ == FilterHeadersStatus::StopIteration) &&
@@ -637,12 +647,18 @@ DEFINE_PROTO_FUZZER(const test::common::http::ConnManagerImplTestCase& input) {
       std::make_shared<Network::Address::Ipv4Instance>("0.0.0.0"));
 
   ConnectionManagerImpl conn_manager(config, drain_close, random, http_context, runtime, local_info,
-                                     cluster_manager, overload_manager, config->time_system_);
+                                     cluster_manager, overload_manager, config->time_system_,
+                                     envoy::config::core::v3::TrafficDirection::UNSPECIFIED);
   conn_manager.initializeReadFilterCallbacks(filter_callbacks);
 
   std::vector<FuzzStreamPtr> streams;
 
-  for (const auto& action : input.actions()) {
+  // Limiting the number of actions processed to avoid excessively long executions
+  constexpr uint32_t kMaxActions = 4096;
+  const uint32_t num_actions =
+      std::min<uint32_t>(kMaxActions, static_cast<uint32_t>(input.actions_size()));
+  for (uint32_t i = 0; i < num_actions; ++i) {
+    const auto& action = input.actions(static_cast<int>(i));
     ENVOY_LOG_MISC(trace, "action {} with {} streams", action.DebugString(), streams.size());
     if (!connection_alive) {
       ENVOY_LOG_MISC(trace, "skipping due to dead connection");

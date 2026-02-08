@@ -7,7 +7,9 @@
 #include "source/common/router/string_accessor_impl.h"
 #include "source/common/stream_info/uint32_accessor_impl.h"
 
+#ifdef ENVOY_ENABLE_QUIC
 #include "quiche/quic/core/quic_packets.h"
+#endif
 
 namespace Envoy {
 /**
@@ -19,7 +21,7 @@ public:
 
   // Network::ListenerFilter
   Network::FilterStatus onAccept(Network::ListenerFilterCallbacks& cb) override {
-    absl::MutexLock m(&alpn_lock_);
+    absl::MutexLock m(alpn_lock_);
     ASSERT(!alpn_.empty());
     cb.socket().setRequestedApplicationProtocols({alpn_});
     alpn_.clear();
@@ -31,7 +33,7 @@ public:
   size_t maxReadBytes() const override { return 0; }
 
   static void setAlpn(std::string alpn) {
-    absl::MutexLock m(&alpn_lock_);
+    absl::MutexLock m(alpn_lock_);
     alpn_ = alpn;
   }
 
@@ -87,7 +89,7 @@ public:
 
 class TestFirstPacketReceivedFilterState : public StreamInfo::FilterState::Object {
 public:
-  explicit TestFirstPacketReceivedFilterState() {}
+  explicit TestFirstPacketReceivedFilterState() = default;
   static const absl::string_view key() { return "test.filter_state.quic_first_packet_received"; }
   void incrementPacketCount() { packet_count_++; }
   void setPacketLength(size_t packet_length) { packet_length_ = packet_length; }
@@ -154,6 +156,10 @@ public:
     test_first_packet_received_filter_state_->incrementPacketCount();
     test_first_packet_received_filter_state_->setPacketLength(packet.length());
     test_first_packet_received_filter_state_->setPacketHeadersLength(packet.headers_length());
+    if (packet.headers_length() > 0 && packet.packet_headers() != nullptr) {
+      char* headers_buffer = new char[packet.headers_length()];
+      memcpy(headers_buffer, packet.packet_headers(), packet.headers_length());
+    }
     return Network::FilterStatus::Continue;
   }
 

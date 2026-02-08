@@ -15,10 +15,11 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: >-
       ${{
           github.repository == 'envoyproxy/envoy'
+          && (github.ref_name == 'main')
           && (github.event.push
               || !contains(github.actor, '[bot]'))
       }}
@@ -31,12 +32,12 @@ jobs:
         - data-plane-api
         - mobile-website
     steps:
-    - uses: envoyproxy/toolshed/gh-actions/appauth@actions-v0.2.35
+    - uses: envoyproxy/toolshed/actions/appauth@35f9bcf37d0ceaedea0250da014348ce4bdf8d35  # v0.4.1
       id: appauth
       with:
         app_id: ${{ secrets.ENVOY_CI_SYNC_APP_ID }}
         key: ${{ secrets.ENVOY_CI_SYNC_APP_KEY }}
-    - uses: envoyproxy/toolshed/gh-actions/dispatch@actions-v0.2.35
+    - uses: envoyproxy/toolshed/actions/dispatch@35f9bcf37d0ceaedea0250da014348ce4bdf8d35  # v0.4.1
       with:
         repository: "envoyproxy/${{ matrix.downstream }}"
         ref: main

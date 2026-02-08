@@ -12,7 +12,6 @@ envoy_cc_extension(
     name = "config",
     srcs = ["dns_impl.cc"],
     hdrs = ["dns_impl.h"],
-    external_deps = ["ares"],
     visibility = ["//visibility:public"],
     deps = [
         "//envoy/event:dispatcher_interface",
@@ -26,5 +25,6 @@ envoy_cc_extension(
         "//source/common/network:utility_lib",
         "//source/common/network/dns_resolver:dns_factory_util_lib",
         "//source/common/runtime:runtime_features_lib",
+        "@c-ares//:ares",
     ],
 )

@@ -92,7 +92,6 @@ SubsetLoadBalancer::SubsetLoadBalancer(const SubsetLoadBalancerConfig& lb_config
       [this](uint32_t priority, const HostVector&, const HostVector&) {
         refreshSubsets(priority);
         purgeEmptySubsets(subsets_);
-        return absl::OkStatus();
       });
 }
 
@@ -182,13 +181,13 @@ void SubsetLoadBalancer::initSelectorFallbackSubset(
   }
 }
 
-HostConstSharedPtr SubsetLoadBalancer::chooseHost(LoadBalancerContext* context) {
+HostSelectionResponse SubsetLoadBalancer::chooseHost(LoadBalancerContext* context) {
   if (metadata_fallback_policy_ !=
       envoy::config::cluster::v3::
           Cluster_LbSubsetConfig_LbSubsetMetadataFallbackPolicy_FALLBACK_LIST) {
     return chooseHostIteration(context);
   }
-  const ProtobufWkt::Value* metadata_fallbacks = getMetadataFallbackList(context);
+  const Protobuf::Value* metadata_fallbacks = getMetadataFallbackList(context);
   if (metadata_fallbacks == nullptr) {
     return chooseHostIteration(context);
   }
@@ -231,7 +230,7 @@ SubsetLoadBalancer::removeMetadataFallbackList(LoadBalancerContext* context) {
   return {context, to_preserve};
 }
 
-const ProtobufWkt::Value*
+const Protobuf::Value*
 SubsetLoadBalancer::getMetadataFallbackList(LoadBalancerContext* context) const {
   if (context == nullptr) {
     return nullptr;
@@ -287,17 +286,17 @@ HostConstSharedPtr SubsetLoadBalancer::chooseHostIteration(LoadBalancerContext* 
     return nullptr;
   }
 
-  HostConstSharedPtr host = fallback_subset_->lb_subset_->chooseHost(context);
-  if (host != nullptr) {
+  HostSelectionResponse host_response = fallback_subset_->lb_subset_->chooseHost(context);
+  if (host_response.host || host_response.cancelable) {
     stats_.lb_subsets_fallback_.inc();
-    return host;
+    return host_response.host;
   }
 
   if (panic_mode_subset_ != nullptr) {
-    HostConstSharedPtr host = panic_mode_subset_->lb_subset_->chooseHost(context);
-    if (host != nullptr) {
+    HostSelectionResponse host_response = panic_mode_subset_->lb_subset_->chooseHost(context);
+    if (host_response.host || host_response.cancelable) {
       stats_.lb_subsets_fallback_panic_.inc();
-      return host;
+      return host_response.host;
     }
   }
 
@@ -339,11 +338,13 @@ HostConstSharedPtr SubsetLoadBalancer::chooseHostForSelectorFallbackPolicy(
   if (fallback_policy ==
           envoy::config::cluster::v3::Cluster::LbSubsetConfig::LbSubsetSelector::ANY_ENDPOINT &&
       subset_any_ != nullptr) {
-    return subset_any_->lb_subset_->chooseHost(context);
+    return Upstream::LoadBalancer::onlyAllowSynchronousHostSelection(
+        subset_any_->lb_subset_->chooseHost(context));
   } else if (fallback_policy == envoy::config::cluster::v3::Cluster::LbSubsetConfig::
                                     LbSubsetSelector::DEFAULT_SUBSET &&
              subset_default_ != nullptr) {
-    return subset_default_->lb_subset_->chooseHost(context);
+    return Upstream::LoadBalancer::onlyAllowSynchronousHostSelection(
+        subset_default_->lb_subset_->chooseHost(context));
   } else if (fallback_policy ==
              envoy::config::cluster::v3::Cluster::LbSubsetConfig::LbSubsetSelector::KEYS_SUBSET) {
     ASSERT(fallback_params.fallback_keys_subset_);
@@ -352,7 +353,7 @@ HostConstSharedPtr SubsetLoadBalancer::chooseHostForSelectorFallbackPolicy(
     // Perform whole subset load balancing again with reduced metadata match criteria
     return chooseHostIteration(filtered_context.get());
   } else {
-    return nullptr;
+    return {nullptr};
   }
 }
 
@@ -365,19 +366,20 @@ HostConstSharedPtr SubsetLoadBalancer::tryChooseHostFromContext(LoadBalancerCont
   host_chosen = false;
   const Router::MetadataMatchCriteria* match_criteria = context->metadataMatchCriteria();
   if (!match_criteria) {
-    return nullptr;
+    return {nullptr};
   }
 
   // Route has metadata match criteria defined, see if we have a matching subset.
   LbSubsetEntryPtr entry = findSubset(match_criteria->metadataMatchCriteria());
   if (entry == nullptr || !entry->active()) {
     // No matching subset or subset not active: use fallback policy.
-    return nullptr;
+    return {nullptr};
   }
 
   host_chosen = true;
   stats_.lb_subsets_selected_.inc();
-  return entry->lb_subset_->chooseHost(context);
+  return Upstream::LoadBalancer::onlyAllowSynchronousHostSelection(
+      entry->lb_subset_->chooseHost(context));
 }
 
 // Iterates over the given metadata match criteria (which must be lexically sorted by key) and
@@ -420,25 +422,23 @@ SubsetLoadBalancer::LbSubsetEntryPtr SubsetLoadBalancer::findSubset(
 }
 
 void SubsetLoadBalancer::updateFallbackSubset(uint32_t priority, const HostVector& all_hosts) {
-  auto update_func = [priority, &all_hosts](LbSubsetPtr& subset, const HostPredicate& predicate,
-                                            uint64_t seed) {
+  auto update_func = [priority, &all_hosts](LbSubsetPtr& subset, const HostPredicate& predicate) {
     for (const auto& host : all_hosts) {
       if (predicate(*host)) {
         subset->pushHost(priority, host);
       }
     }
-    subset->finalize(priority, seed);
+    subset->finalize(priority);
   };
 
   if (subset_any_ != nullptr) {
-    update_func(
-        subset_any_->lb_subset_, [](const Host&) { return true; }, random_.random());
+    update_func(subset_any_->lb_subset_, [](const Host&) { return true; });
   }
 
   if (subset_default_ != nullptr) {
     HostPredicate predicate = std::bind(&SubsetLoadBalancer::hostMatches, this,
                                         default_subset_metadata_, std::placeholders::_1);
-    update_func(subset_default_->lb_subset_, predicate, random_.random());
+    update_func(subset_default_->lb_subset_, predicate);
   }
 
   if (fallback_subset_ == nullptr) {
@@ -513,9 +513,9 @@ void SubsetLoadBalancer::processSubsets(uint32_t priority, const HostVector& all
   single_duplicate_stat_->set(collision_count_of_single_host_entries);
 
   // Finalize updates after all the hosts are evaluated.
-  forEachSubset(subsets_, [priority, this](LbSubsetEntryPtr entry) {
+  forEachSubset(subsets_, [priority](LbSubsetEntryPtr entry) {
     if (entry->initialized()) {
-      entry->lb_subset_->finalize(priority, random_.random());
+      entry->lb_subset_->finalize(priority);
     }
   });
 }
@@ -555,7 +555,7 @@ SubsetLoadBalancer::extractSubsetMetadata(const std::set<std::string>& subset_ke
       break;
     }
 
-    if (list_as_any_ && it->second.kind_case() == ProtobufWkt::Value::kListValue) {
+    if (list_as_any_ && it->second.kind_case() == Protobuf::Value::kListValue) {
       // If the list of kvs is empty, we initialize one kvs for each value in the list.
       // Otherwise, we branch the list of kvs by generating one new kvs per old kvs per
       // new value.
@@ -609,7 +609,7 @@ std::string SubsetLoadBalancer::describeMetadata(const SubsetLoadBalancer::Subse
       first = false;
     }
 
-    const ProtobufWkt::Value& value = it.second;
+    const Protobuf::Value& value = it.second;
     buf << it.first << "=" << MessageUtil::getJsonStringFromMessageOrError(value);
   }
   return buf.str();
@@ -623,7 +623,7 @@ SubsetLoadBalancer::findOrCreateLbSubsetEntry(LbSubsetMap& subsets, const Subset
   ASSERT(idx < kvs.size());
 
   const std::string& name = kvs[idx].first;
-  const ProtobufWkt::Value& pb_value = kvs[idx].second;
+  const Protobuf::Value& pb_value = kvs[idx].second;
   const HashedValue value(pb_value);
 
   LbSubsetEntryPtr entry;
@@ -730,7 +730,7 @@ SubsetLoadBalancer::PrioritySubsetImpl::PrioritySubsetImpl(const SubsetLoadBalan
 // hosts that belong in this subset.
 void SubsetLoadBalancer::HostSubsetImpl::update(const HostHashSet& matching_hosts,
                                                 const HostVector& hosts_added,
-                                                const HostVector& hosts_removed, uint64_t seed) {
+                                                const HostVector& hosts_removed) {
   auto cached_predicate = [&matching_hosts](const auto& host) {
     return matching_hosts.count(&host) == 1;
   };
@@ -791,7 +791,7 @@ void SubsetLoadBalancer::HostSubsetImpl::update(const HostHashSet& matching_host
       HostSetImpl::updateHostsParams(
           hosts, hosts_per_locality, healthy_hosts, healthy_hosts_per_locality, degraded_hosts,
           degraded_hosts_per_locality, excluded_hosts, excluded_hosts_per_locality),
-      determineLocalityWeights(*hosts_per_locality), hosts_added, hosts_removed, seed,
+      determineLocalityWeights(*hosts_per_locality), hosts_added, hosts_removed,
       original_host_set_.weightedPriorityHealth(), original_host_set_.overprovisioningFactor());
 }
 
@@ -848,10 +848,9 @@ HostSetImplPtr SubsetLoadBalancer::PrioritySubsetImpl::createHostSet(
 void SubsetLoadBalancer::PrioritySubsetImpl::update(uint32_t priority,
                                                     const HostHashSet& matching_hosts,
                                                     const HostVector& hosts_added,
-                                                    const HostVector& hosts_removed,
-                                                    uint64_t seed) {
+                                                    const HostVector& hosts_removed) {
   const auto& host_subset = getOrCreateHostSet(priority);
-  updateSubset(priority, matching_hosts, hosts_added, hosts_removed, seed);
+  updateSubset(priority, matching_hosts, hosts_added, hosts_removed);
 
   if (host_subset.hosts().empty() != empty_) {
     empty_ = true;
@@ -868,6 +867,33 @@ void SubsetLoadBalancer::PrioritySubsetImpl::update(uint32_t priority,
   }
 }
 
+void SubsetLoadBalancer::PriorityLbSubset::finalize(uint32_t priority) {
+  while (host_sets_.size() <= priority) {
+    host_sets_.push_back({HostHashSet(), HostHashSet()});
+  }
+  auto& [old_hosts, new_hosts] = host_sets_[priority];
+
+  HostVector added;
+  HostVector removed;
+
+  for (const auto& host : old_hosts) {
+    if (new_hosts.count(host) == 0) {
+      removed.emplace_back(host);
+    }
+  }
+
+  for (const auto& host : new_hosts) {
+    if (old_hosts.count(host) == 0) {
+      added.emplace_back(host);
+    }
+  }
+
+  subset_.update(priority, new_hosts, added, removed);
+
+  old_hosts.swap(new_hosts);
+  new_hosts.clear();
+}
+
 SubsetLoadBalancer::LoadBalancerContextWrapper::LoadBalancerContextWrapper(
     LoadBalancerContext* wrapped,
     const std::set<std::string>& filtered_metadata_match_criteria_names)
@@ -879,7 +905,7 @@ SubsetLoadBalancer::LoadBalancerContextWrapper::LoadBalancerContextWrapper(
 }
 
 SubsetLoadBalancer::LoadBalancerContextWrapper::LoadBalancerContextWrapper(
-    LoadBalancerContext* wrapped, const ProtobufWkt::Struct& metadata_match_criteria_override)
+    LoadBalancerContext* wrapped, const Protobuf::Struct& metadata_match_criteria_override)
     : wrapped_(wrapped) {
   ASSERT(wrapped->metadataMatchCriteria());
   metadata_match_ =

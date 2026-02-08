@@ -1,5 +1,8 @@
 #include <memory>
 
+#include "envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.pb.h"
+#include "envoy/extensions/request_id/uuid/v3/uuid.pb.h"
+
 #include "source/common/tcp_proxy/tcp_proxy.h"
 #include "source/common/tcp_proxy/upstream.h"
 
@@ -216,19 +219,6 @@ TEST_P(HttpUpstreamTest, UpstreamTrailersPropagateFinDownstream) {
   upstream_->responseDecoder().decodeTrailers(std::move(trailers));
 }
 
-TEST_P(HttpUpstreamTest, UpstreamTrailersDontPropagateFinDownstreamWhenFeatureDisabled) {
-  TestScopedRuntime scoped_runtime;
-  scoped_runtime.mergeValues(
-      {{"envoy.reloadable_features.tcp_tunneling_send_downstream_fin_on_upstream_trailers",
-        "false"}});
-  setupUpstream();
-  EXPECT_CALL(encoder_.stream_, resetStream(_)).Times(0);
-  upstream_->doneWriting();
-  EXPECT_CALL(callbacks_, onUpstreamData(_, _)).Times(0);
-  Http::ResponseTrailerMapPtr trailers{new Http::TestResponseTrailerMapImpl{{"key", "value"}}};
-  upstream_->responseDecoder().decodeTrailers(std::move(trailers));
-}
-
 class HttpUpstreamRequestEncoderTest : public testing::TestWithParam<Http::CodecType> {
 public:
   HttpUpstreamRequestEncoderTest() {
@@ -252,7 +242,7 @@ public:
 
   void populateMetadata(envoy::config::core::v3::Metadata& metadata, const std::string& ns,
                         const std::string& key, const std::string& value) {
-    ProtobufWkt::Struct struct_obj;
+    Protobuf::Struct struct_obj;
     auto& fields_map = *struct_obj.mutable_fields();
     fields_map[key] = ValueUtil::stringValue(value);
     (*metadata.mutable_filter_metadata())[ns] = struct_obj;
@@ -324,6 +314,76 @@ TEST_P(HttpUpstreamRequestEncoderTest, RequestEncoderUsePostWithCustomPath) {
   }
 
   EXPECT_CALL(this->encoder_, encodeHeaders(HeaderMapEqualRef(expected_headers.get()), false));
+  this->upstream_->setRequestEncoder(this->encoder_, false);
+}
+
+TEST_P(HttpUpstreamRequestEncoderTest, RequestIdGeneratedWhenEnabled) {
+  envoy::extensions::filters::network::http_connection_manager::v3::RequestIDExtension reqid_ext;
+  envoy::extensions::request_id::uuid::v3::UuidRequestIdConfig uuid_cfg;
+  reqid_ext.mutable_typed_config()->PackFrom(uuid_cfg);
+  *this->tcp_proxy_.mutable_tunneling_config()->mutable_request_id_extension() = reqid_ext;
+  this->setupUpstream();
+
+  EXPECT_CALL(this->encoder_, encodeHeaders(_, false))
+      .WillOnce(Invoke([&](const Http::RequestHeaderMap& headers, bool) {
+        const auto* rid = headers.RequestId();
+        EXPECT_NE(rid, nullptr);
+        if (rid != nullptr) {
+          EXPECT_FALSE(rid->value().empty());
+        }
+        return Http::okStatus();
+      }));
+
+  this->upstream_->setRequestEncoder(this->encoder_, false);
+}
+
+MATCHER(HasNonEmptyTunnelRequestId, "Struct has non-empty tunnel_request_id") {
+  const Protobuf::Struct& st = arg;
+  const auto& fields = st.fields();
+  auto it = fields.find("tunnel_request_id");
+  return it != fields.end() && !it->second.string_value().empty();
+}
+
+TEST_P(HttpUpstreamRequestEncoderTest, RequestIdStoredInDynamicMetadataWhenEnabled) {
+  envoy::extensions::filters::network::http_connection_manager::v3::RequestIDExtension reqid_ext;
+  envoy::extensions::request_id::uuid::v3::UuidRequestIdConfig uuid_cfg;
+  reqid_ext.mutable_typed_config()->PackFrom(uuid_cfg);
+  *this->tcp_proxy_.mutable_tunneling_config()->mutable_request_id_extension() = reqid_ext;
+  this->setupUpstream();
+  EXPECT_CALL(this->downstream_stream_info_,
+              setDynamicMetadata("envoy.filters.network.tcp_proxy", HasNonEmptyTunnelRequestId()));
+  EXPECT_CALL(this->encoder_, encodeHeaders(_, false)).WillOnce(Return(Http::okStatus()));
+  this->upstream_->setRequestEncoder(this->encoder_, false);
+}
+
+TEST_P(HttpUpstreamRequestEncoderTest, RequestIdHeaderOverrideAndMetadataKeyOverride) {
+  envoy::extensions::filters::network::http_connection_manager::v3::RequestIDExtension reqid_ext;
+  envoy::extensions::request_id::uuid::v3::UuidRequestIdConfig uuid_cfg;
+  reqid_ext.mutable_typed_config()->PackFrom(uuid_cfg);
+  auto* tunneling = this->tcp_proxy_.mutable_tunneling_config();
+  *tunneling->mutable_request_id_extension() = reqid_ext;
+  tunneling->set_request_id_header("x-rid");
+  tunneling->set_request_id_metadata_key("rid");
+  this->setupUpstream();
+
+  EXPECT_CALL(this->encoder_, encodeHeaders(_, false))
+      .WillOnce(Invoke([&](const Http::RequestHeaderMap& headers, bool) {
+        // The default x-request-id should be removed if a custom header is configured.
+        EXPECT_EQ(nullptr, headers.RequestId());
+        const auto custom = headers.get(Http::LowerCaseString("x-rid"));
+        EXPECT_EQ(1, custom.size());
+        EXPECT_FALSE(custom[0]->value().empty());
+        return Http::okStatus();
+      }));
+
+  EXPECT_CALL(this->downstream_stream_info_, setDynamicMetadata(_, _))
+      .WillOnce(Invoke([](absl::string_view ns, const Protobuf::Struct& st) {
+        EXPECT_EQ(ns, "envoy.filters.network.tcp_proxy");
+        const auto& fields = st.fields();
+        auto it = fields.find("rid");
+        EXPECT_TRUE(it != fields.end());
+      }));
+
   this->upstream_->setRequestEncoder(this->encoder_, false);
 }
 
@@ -504,9 +564,9 @@ public:
 
   void setup() {
     tunnel_config_ = std::make_unique<TunnelingConfigHelperImpl>(scope_, tcp_proxy_, context_);
-    conn_pool_ = std::make_unique<HttpConnPool>(cluster_, &lb_context_, *tunnel_config_, callbacks_,
-                                                decoder_callbacks_, Http::CodecType::HTTP2,
-                                                downstream_stream_info_);
+    conn_pool_ = std::make_unique<HttpConnPool>(nullptr, cluster_, &lb_context_, *tunnel_config_,
+                                                callbacks_, decoder_callbacks_,
+                                                Http::CodecType::HTTP2, downstream_stream_info_);
     upstream_ = std::make_unique<CombinedUpstream>(*conn_pool_, callbacks_, decoder_callbacks_,
                                                    *tunnel_config_, downstream_stream_info_);
     auto mock_conn_pool = std::make_unique<NiceMock<Router::MockGenericConnPool>>();
@@ -581,6 +641,21 @@ TEST_F(CombinedUpstreamTest, WriteUpstream) {
   this->upstream_ = std::make_unique<CombinedUpstream>(*conn_pool_, callbacks_, decoder_callbacks_,
                                                        *tunnel_config_, downstream_stream_info_);
   this->upstream_->encodeData(buffer2, true);
+}
+
+TEST_F(CombinedUpstreamTest, CombinedUpstreamGeneratesRequestIdWhenEnabled) {
+  envoy::extensions::filters::network::http_connection_manager::v3::RequestIDExtension reqid_ext;
+  envoy::extensions::request_id::uuid::v3::UuidRequestIdConfig uuid_cfg;
+  reqid_ext.mutable_typed_config()->PackFrom(uuid_cfg);
+  *this->tcp_proxy_.mutable_tunneling_config()->mutable_request_id_extension() = reqid_ext;
+  this->setup();
+  auto* headers = this->upstream_->downstreamHeaders();
+  ASSERT_NE(headers, nullptr);
+  const auto* rid = headers->RequestId();
+  EXPECT_NE(rid, nullptr);
+  if (rid != nullptr) {
+    EXPECT_FALSE(rid->value().empty());
+  }
 }
 
 TEST_F(CombinedUpstreamTest, WriteDownstream) {
@@ -670,17 +745,6 @@ TEST_F(CombinedUpstreamTest, UpstreamTrailersMarksDoneReading) {
   this->upstream_->responseDecoder().decodeTrailers(std::move(trailers));
 }
 
-TEST_F(CombinedUpstreamTest, UpstreamTrailersDontPropagateFinDownstreamWhenFeatureDisabled) {
-  TestScopedRuntime scoped_runtime;
-  scoped_runtime.mergeValues(
-      {{"envoy.reloadable_features.tcp_tunneling_send_downstream_fin_on_upstream_trailers",
-        "false"}});
-  this->setup();
-  upstream_->doneWriting();
-  EXPECT_CALL(callbacks_, onUpstreamData(_, _)).Times(0);
-  Http::ResponseTrailerMapPtr trailers{new Http::TestResponseTrailerMapImpl{{"key", "value"}}};
-  upstream_->responseDecoder().decodeTrailers(std::move(trailers));
-}
 } // namespace
 } // namespace TcpProxy
 } // namespace Envoy

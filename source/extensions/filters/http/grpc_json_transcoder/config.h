@@ -25,7 +25,14 @@ private:
           proto_config,
       const std::string& stats_prefix, Server::Configuration::FactoryContext& context) override;
 
-  Router::RouteSpecificFilterConfigConstSharedPtr createRouteSpecificFilterConfigTyped(
+  Http::FilterFactoryCb createFilterFactoryFromProtoWithServerContextTyped(
+      const envoy::extensions::filters::http::grpc_json_transcoder::v3::GrpcJsonTranscoder&
+          proto_config,
+      const std::string& stats_prefix,
+      Server::Configuration::ServerFactoryContext& context) override;
+
+  absl::StatusOr<Router::RouteSpecificFilterConfigConstSharedPtr>
+  createRouteSpecificFilterConfigTyped(
       const envoy::extensions::filters::http::grpc_json_transcoder::v3::GrpcJsonTranscoder&,
       Server::Configuration::ServerFactoryContext& context,
       ProtobufMessage::ValidationVisitor& validator) override;

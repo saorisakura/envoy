@@ -1,10 +1,11 @@
 #include "source/extensions/filters/http/jwt_authn/jwt_cache.h"
 
+#include <limits>
+
 #include "source/common/common/assert.h"
+#include "source/common/jwt/simple_lru_cache_inl.h"
 
-#include "simple_lru_cache/simple_lru_cache_inl.h"
-
-using ::google::simple_lru_cache::SimpleLRUCache;
+using ::Envoy::SimpleLruCache::SimpleLRUCache;
 
 namespace Envoy {
 namespace Extensions {
@@ -25,8 +26,9 @@ public:
       // if cache_size is 0, it is not specified in the config, use default
       auto cache_size =
           config.jwt_cache_size() == 0 ? kJwtCacheDefaultSize : config.jwt_cache_size();
-      jwt_lru_cache_ =
-          std::make_unique<SimpleLRUCache<std::string, ::google::jwt_verify::Jwt>>(cache_size);
+      jwt_lru_cache_ = std::make_unique<SimpleLRUCache<std::string, JwtVerify::Jwt>>(cache_size);
+      max_jwt_size_for_cache_ =
+          config.jwt_max_token_size() == 0 ? kMaxJwtSizeForCache : config.jwt_max_token_size();
     }
   }
 
@@ -36,17 +38,16 @@ public:
     }
   }
 
-  ::google::jwt_verify::Jwt* lookup(const std::string& token) override {
+  JwtVerify::Jwt* lookup(const std::string& token) override {
     if (!jwt_lru_cache_) {
       return nullptr;
     }
-    SimpleLRUCache<std::string, ::google::jwt_verify::Jwt>::ScopedLookup lookup(
-        jwt_lru_cache_.get(), token);
+    SimpleLRUCache<std::string, JwtVerify::Jwt>::ScopedLookup lookup(jwt_lru_cache_.get(), token);
     if (lookup.found()) {
-      ::google::jwt_verify::Jwt* const found_jwt = lookup.value();
+      JwtVerify::Jwt* const found_jwt = lookup.value();
       ASSERT(found_jwt != nullptr);
       if (found_jwt->verifyTimeConstraint(DateUtil::nowToSeconds(time_source_)) !=
-          ::google::jwt_verify::Status::JwtExpired) {
+          JwtVerify::Status::JwtExpired) {
         return found_jwt;
       } else {
         jwt_lru_cache_->remove(token);
@@ -55,16 +56,20 @@ public:
     return nullptr;
   }
 
-  void insert(const std::string& token, std::unique_ptr<::google::jwt_verify::Jwt>&& jwt) override {
-    if (jwt_lru_cache_ && token.size() <= kMaxJwtSizeForCache) {
+  void insert(const std::string& token, std::unique_ptr<JwtVerify::Jwt>&& jwt) override {
+    if (!jwt_lru_cache_ || token.size() > std::numeric_limits<uint32_t>::max()) {
+      return;
+    }
+    if (static_cast<uint32_t>(token.size()) <= max_jwt_size_for_cache_) {
       // pass the ownership of jwt to cache
       jwt_lru_cache_->insert(token, jwt.release(), 1);
     }
   }
 
 private:
-  std::unique_ptr<SimpleLRUCache<std::string, ::google::jwt_verify::Jwt>> jwt_lru_cache_;
+  std::unique_ptr<SimpleLRUCache<std::string, JwtVerify::Jwt>> jwt_lru_cache_;
   TimeSource& time_source_;
+  uint32_t max_jwt_size_for_cache_;
 };
 } // namespace
 

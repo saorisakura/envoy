@@ -632,10 +632,11 @@ TEST_P(ListenerExtensionDiscoveryIntegrationTest, BasicSuccessWithConfigDump) {
   BufferingStreamDecoderPtr response;
   EXPECT_EQ("200", request("admin", "GET", "/config_dump", response));
   EXPECT_EQ("application/json", contentType(response));
-  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body());
+  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body()).value();
   size_t index = 0;
-  for (const Json::ObjectSharedPtr& obj_ptr : json->getObjectArray("configs")) {
-    EXPECT_TRUE(expected_types[index].compare(obj_ptr->getString("@type")) == 0);
+  auto array = json->getObjectArray("configs").value();
+  for (Json::ObjectSharedPtr obj_ptr : array) {
+    EXPECT_TRUE(expected_types[index].compare(obj_ptr->getString("@type").value()) == 0);
     index++;
   }
 
@@ -702,10 +703,11 @@ TEST_P(ListenerExtensionDiscoveryIntegrationTest, TwoSubscriptionsSameFilterType
   BufferingStreamDecoderPtr response;
   EXPECT_EQ("200", request("admin", "GET", "/config_dump", response));
   EXPECT_EQ("application/json", contentType(response));
-  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body());
+  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body()).value();
   size_t index = 0;
-  for (const Json::ObjectSharedPtr& obj_ptr : json->getObjectArray("configs")) {
-    EXPECT_TRUE(expected_types[index].compare(obj_ptr->getString("@type")) == 0);
+  auto array = json->getObjectArray("configs").value();
+  for (const Json::ObjectSharedPtr& obj_ptr : array) {
+    EXPECT_TRUE(expected_types[index].compare((*obj_ptr->getString("@type"))) == 0);
     index++;
   }
 
@@ -767,10 +769,12 @@ TEST_P(ListenerExtensionDiscoveryIntegrationTest, TwoSubscriptionsConfigDumpWith
 
 #ifdef ENVOY_ENABLE_QUIC
 
-#include "quiche/quic/core/deterministic_connection_id_generator.h"
 #include "source/common/quic/client_connection_factory_impl.h"
 #include "source/common/quic/quic_server_transport_socket_factory.h"
+
 #include "test/integration/utility.h"
+
+#include "quiche/quic/core/deterministic_connection_id_generator.h"
 
 namespace Envoy {
 namespace {
@@ -908,8 +912,7 @@ TEST_P(QuicListenerExtensionDiscoveryIntegrationTest, BadEcdsUpdateWithoutDefaul
   Network::ClientConnectionPtr conn = makeClientConnection(lookupPort(port_name_));
   std::shared_ptr<Upstream::MockClusterInfo> cluster{new NiceMock<Upstream::MockClusterInfo>()};
   Upstream::HostDescriptionConstSharedPtr host_description{Upstream::makeTestHostDescription(
-      cluster, fmt::format("tcp://{}:80", Network::Test::getLoopbackAddressUrlString(version_)),
-      timeSystem())};
+      cluster, fmt::format("tcp://{}:80", Network::Test::getLoopbackAddressUrlString(version_)))};
   auto codec = std::make_unique<IntegrationCodecClient>(
       *dispatcher_, random_, std::move(conn), host_description, downstream_protocol_, true);
   EXPECT_TRUE(codec->disconnected());
@@ -947,10 +950,11 @@ TEST_P(QuicListenerExtensionDiscoveryIntegrationTest, ConfigDump) {
   BufferingStreamDecoderPtr response;
   EXPECT_EQ("200", request("admin", "GET", "/config_dump", response));
   EXPECT_EQ("application/json", contentType(response));
-  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body());
+  Json::ObjectSharedPtr json = Json::Factory::loadFromString(response->body()).value();
   size_t index = 0;
-  for (const Json::ObjectSharedPtr& obj_ptr : json->getObjectArray("configs")) {
-    EXPECT_TRUE(expected_types[index].compare(obj_ptr->getString("@type")) == 0);
+  auto array = json->getObjectArray("configs").value();
+  for (const Json::ObjectSharedPtr& obj_ptr : array) {
+    EXPECT_TRUE(expected_types[index].compare(*obj_ptr->getString("@type")) == 0);
     index++;
   }
 

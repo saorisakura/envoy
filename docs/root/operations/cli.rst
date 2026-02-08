@@ -274,6 +274,15 @@ following are the command line options that Envoy supports.
   when tailing :ref:`access logs <arch_overview_access_logs>` in order to
   get more (or less) immediate flushing.
 
+.. option:: --file-flush-min-size-kb <integer>
+
+  *(optional)* The minimum size in kilobytes for file flushing. Defaults to 64.
+  This setting is used during file creation to determine the minimum buffer size
+  before flushing to files. The buffer will flush every time it gets full, or every time
+  the interval has elapsed, whichever comes first. Adjusting this setting is useful
+  when tailing :ref:`access logs <arch_overview_access_logs>` in order to
+  get more (or less) immediate flushing.
+
 .. option:: --drain-time-s <integer>
 
   *(optional)* The time in seconds that Envoy will drain connections during
@@ -347,6 +356,13 @@ following are the command line options that Envoy supports.
     message and fields. It is *strongly* recommended that this option is not set on at least a
     small portion of the fleet (staging, canary, etc.) in order to monitor for unknown,
     deprecated, or work-in-progress usage.
+
+.. option:: --skip-deprecated-logs
+
+  *(optional)* This option disables the logging of deprecated field warnings during Protobuf message validation.
+  When enabled, deprecated fields will be silently ignored without generating log messages, which can be useful
+  for reducing log verbosity in production environments. By default, deprecated warnings are logged. The suppression
+  of these warnings is only activated when this CLI option is explicitly used.
 
 .. option:: --disable-extensions <extension list>
 

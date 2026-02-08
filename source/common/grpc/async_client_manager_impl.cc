@@ -43,24 +43,23 @@ bool validateGrpcCompatibleAsciiHeaderValue(absl::string_view h_value) {
 
 } // namespace
 
-AsyncClientFactoryImpl::AsyncClientFactoryImpl(Upstream::ClusterManager& cm,
-                                               const envoy::config::core::v3::GrpcService& config,
-                                               bool skip_cluster_check, TimeSource& time_source,
+AsyncClientFactoryImpl::AsyncClientFactoryImpl(const envoy::config::core::v3::GrpcService& config,
+                                               bool skip_cluster_check,
+                                               Server::Configuration::CommonFactoryContext& context,
                                                absl::Status& creation_status)
-    : cm_(cm), config_(config), time_source_(time_source) {
+    : config_(config), context_(context) {
   if (skip_cluster_check) {
     creation_status = absl::OkStatus();
   } else {
-    creation_status = cm_.checkActiveStaticCluster(config.envoy_grpc().cluster_name());
+    creation_status =
+        context_.clusterManager().checkActiveStaticCluster(config.envoy_grpc().cluster_name());
   }
 }
 
 AsyncClientManagerImpl::AsyncClientManagerImpl(
-    Upstream::ClusterManager& cm, ThreadLocal::Instance& tls,
-    Server::Configuration::CommonFactoryContext& context, const StatNames& stat_names,
-    const envoy::config::bootstrap::v3::Bootstrap::GrpcAsyncClientManagerConfig& config)
-    : tls_(tls), cm_(cm), context_(context), stat_names_(stat_names),
-      raw_async_client_cache_(context.threadLocal()) {
+    const envoy::config::bootstrap::v3::Bootstrap::GrpcAsyncClientManagerConfig& config,
+    Server::Configuration::CommonFactoryContext& context, const StatNames& stat_names)
+    : context_(context), stat_names_(stat_names), raw_async_client_cache_(context.threadLocal()) {
 
   const auto max_cached_entry_idle_duration = std::chrono::milliseconds(
       PROTOBUF_GET_MS_OR_DEFAULT(config, max_cached_entry_idle_duration, DefaultEntryIdleDuration));
@@ -76,20 +75,18 @@ AsyncClientManagerImpl::AsyncClientManagerImpl(
 #endif
 }
 
-RawAsyncClientPtr AsyncClientFactoryImpl::createUncachedRawAsyncClient() {
-  return std::make_unique<AsyncClientImpl>(cm_, config_, time_source_);
+absl::StatusOr<RawAsyncClientPtr> AsyncClientFactoryImpl::createUncachedRawAsyncClient() {
+  return AsyncClientImpl::create(config_, context_);
 }
 
 GoogleAsyncClientFactoryImpl::GoogleAsyncClientFactoryImpl(
-    ThreadLocal::Instance& tls, ThreadLocal::Slot* google_tls_slot, Stats::Scope& scope,
-    const envoy::config::core::v3::GrpcService& config,
-    Server::Configuration::CommonFactoryContext& context, const StatNames& stat_names,
-    absl::Status& creation_status)
-    : tls_(tls), google_tls_slot_(google_tls_slot),
+    const envoy::config::core::v3::GrpcService& config, ThreadLocal::Slot* google_tls_slot,
+    Stats::Scope& scope, Server::Configuration::CommonFactoryContext& context,
+    const StatNames& stat_names, absl::Status& creation_status)
+    : google_tls_slot_(google_tls_slot),
       scope_(scope.createScope(fmt::format("grpc.{}.", config.google_grpc().stat_prefix()))),
       config_(config), factory_context_(context), stat_names_(stat_names) {
 #ifndef ENVOY_GOOGLE_GRPC
-  UNREFERENCED_PARAMETER(tls_);
   UNREFERENCED_PARAMETER(google_tls_slot_);
   UNREFERENCED_PARAMETER(scope_);
   UNREFERENCED_PARAMETER(config_);
@@ -123,12 +120,13 @@ GoogleAsyncClientFactoryImpl::GoogleAsyncClientFactoryImpl(
   }
 }
 
-RawAsyncClientPtr GoogleAsyncClientFactoryImpl::createUncachedRawAsyncClient() {
+absl::StatusOr<RawAsyncClientPtr> GoogleAsyncClientFactoryImpl::createUncachedRawAsyncClient() {
 #ifdef ENVOY_GOOGLE_GRPC
   GoogleGenericStubFactory stub_factory;
   return std::make_unique<GoogleAsyncClientImpl>(
-      tls_.dispatcher(), google_tls_slot_->getTyped<GoogleAsyncClientThreadLocal>(), stub_factory,
-      scope_, config_, factory_context_, stat_names_);
+      factory_context_.threadLocal().dispatcher(),
+      google_tls_slot_->getTyped<GoogleAsyncClientThreadLocal>(), stub_factory, scope_, config_,
+      factory_context_, stat_names_);
 #else
   return nullptr;
 #endif
@@ -141,12 +139,12 @@ AsyncClientManagerImpl::factoryForGrpcService(const envoy::config::core::v3::Grp
   AsyncClientFactoryPtr factory;
   switch (config.target_specifier_case()) {
   case envoy::config::core::v3::GrpcService::TargetSpecifierCase::kEnvoyGrpc:
-    factory = std::make_unique<AsyncClientFactoryImpl>(cm_, config, skip_cluster_check,
-                                                       context_.timeSource(), creation_status);
+    factory = std::make_unique<AsyncClientFactoryImpl>(config, skip_cluster_check, context_,
+                                                       creation_status);
     break;
   case envoy::config::core::v3::GrpcService::TargetSpecifierCase::kGoogleGrpc:
     factory = std::make_unique<GoogleAsyncClientFactoryImpl>(
-        tls_, google_tls_slot_.get(), scope, config, context_, stat_names_, creation_status);
+        config, google_tls_slot_.get(), scope, context_, stat_names_, creation_status);
     break;
   case envoy::config::core::v3::GrpcService::TargetSpecifierCase::TARGET_SPECIFIER_NOT_SET:
     PANIC_DUE_TO_PROTO_UNSET;
@@ -168,7 +166,9 @@ absl::StatusOr<RawAsyncClientSharedPtr> AsyncClientManagerImpl::getOrCreateRawAs
   auto factory_or_error =
       factoryForGrpcService(config_with_hash_key.config(), scope, skip_cluster_check);
   RETURN_IF_NOT_OK_REF(factory_or_error.status());
-  client = factory_or_error.value()->createUncachedRawAsyncClient();
+  auto client_or_error = factory_or_error.value()->createUncachedRawAsyncClient();
+  RETURN_IF_NOT_OK_REF(client_or_error.status());
+  client = std::move(*client_or_error);
   raw_async_client_cache_->setCache(config_with_hash_key, client);
   return client;
 }
@@ -184,7 +184,9 @@ AsyncClientManagerImpl::getOrCreateRawAsyncClientWithHashKey(
   auto factory_or_error =
       factoryForGrpcService(config_with_hash_key.config(), scope, skip_cluster_check);
   RETURN_IF_NOT_OK_REF(factory_or_error.status());
-  client = factory_or_error.value()->createUncachedRawAsyncClient();
+  auto client_or_error = factory_or_error.value()->createUncachedRawAsyncClient();
+  RETURN_IF_NOT_OK_REF(client_or_error.status());
+  client = std::move(*client_or_error);
   raw_async_client_cache_->setCache(config_with_hash_key, client);
   return client;
 }

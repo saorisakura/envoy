@@ -8,9 +8,11 @@ on:
     paths:
     - include/**
     - source/common/**
-    branches-ignore:
-    - dependabot/**
+    branches:
+    - main
   pull_request:
+    branches:
+    - main
 
 concurrency:
   group: ${{ github.head_ref || github.run_id }}-${{ github.workflow }}
@@ -28,11 +30,32 @@ jobs:
       # for github/codeql-action/analyze to upload SARIF results
       security-events: write
       pull-requests: read
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     if: github.repository == 'envoyproxy/envoy'
     steps:
+    - uses: envoyproxy/toolshed/actions/bind-mounts@35f9bcf37d0ceaedea0250da014348ce4bdf8d35  # v0.4.1
+      if: |
+        ! github.event.repository.private
+      with:
+        mounts: |
+          - src: /mnt/workspace
+            target: GITHUB_WORKSPACE
+            chown: "runner:runner"
+          - src: /mnt/runner-cache
+            target: /home/runner/.cache
+            chown: "runner:runner"
+    - name: Free disk space
+      if: |
+        env.BUILD_TARGETS != ''
+        && github.event.repository.private
+      uses: envoyproxy/toolshed/actions/diskspace@35f9bcf37d0ceaedea0250da014348ce4bdf8d35  # v0.4.1
+      with:
+        to_remove: |
+          /usr/local/.ghcup
+          /usr/local/lib/android
+
     - name: Checkout repository
-      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       with:
         fetch-depth: 2
 
@@ -59,54 +82,51 @@ jobs:
       env:
         GIT_EVENT: ${{ github.event_name }}
 
-    - name: Free disk space
-      if: ${{ env.BUILD_TARGETS != '' }}
-      uses: envoyproxy/toolshed/gh-actions/diskspace@actions-v0.2.35
+    - name: Set default build target
+      if: ${{ env.BUILD_TARGETS == '' }}
+      run: |
+        echo "MINIMAL_BUILD_TARGET=//source/common/common:assert_lib" > $GITHUB_ENV
 
     - name: Initialize CodeQL
-      if: ${{ env.BUILD_TARGETS != '' }}
-      uses: github/codeql-action/init@4dd16135b69a43b6c8efb853346f8437d92d3c93  # codeql-bundle-v3.26.6
+      uses: github/codeql-action/init@b20883b0cd1f46c72ae0ba6d1090936928f9fa30  # codeql-bundle-v4.32.0
       with:
         languages: cpp
+        trap-caching: false
 
     - name: Install deps
-      if: ${{ env.BUILD_TARGETS != '' }}
       shell: bash
       run: |
-       sudo apt-get update --error-on=any
-       sudo apt-get install --yes \
-           libtool cmake automake autoconf make ninja-build curl \
-           unzip virtualenv openjdk-11-jdk build-essential libc++1
+       sudo apt-get -qq update --error-on=any
+       sudo apt-get -qq install --yes \
+           libtool libtinfo5 automake autoconf curl unzip
        # Note: the llvm/clang version should match the version specifed in:
        #  - bazel/repository_locations.bzl
        #  - .github/workflows/codeql-daily.yml
        #  - https://github.com/envoyproxy/envoy-build-tools/blob/main/build_container/build_container_ubuntu.sh#L84
-       mkdir -p bin/clang14
-       cd bin/clang14
-       wget https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.0/clang+llvm-14.0.0-x86_64-linux-gnu-ubuntu-18.04.tar.xz
-       tar -xf clang+llvm-14.0.0-x86_64-linux-gnu-ubuntu-18.04.tar.xz --strip-components 1
-       export PATH=bin/clang14/bin:$PATH
+       mkdir -p bin/clang18.1.8
+       cd bin/clang18.1.8
+       wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz
+       tar -xf clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz --strip-components 1
 
     - name: Build
-      if: ${{ env.BUILD_TARGETS != '' }}
       run: |
-       bazel/setup_clang.sh bin/clang14
-       bazel shutdown
-       bazel build \
-           -c fastbuild \
-           --spawn_strategy=local \
-           --discard_analysis_cache \
-           --nouse_action_cache \
-           --config clang \
-           --config libc++ \
-           $BUILD_TARGETS
-       echo -e "Built targets...\n$BUILD_TARGETS"
+        bazel shutdown
+        bazel build \
+            -c fastbuild \
+            --repo_env=BAZEL_LLVM_PATH="$(realpath bin/clang18.1.8)" \
+            --spawn_strategy=local \
+            --discard_analysis_cache \
+            --nouse_action_cache \
+            --features="-layering_check" \
+            --config=clang \
+            --config=ci \
+            ${BUILD_TARGETS:-${MINIMAL_BUILD_TARGET}}
+        echo -e "Built targets...\n${BUILD_TARGETS:-${MINIMAL_BUILD_TARGET}}"
 
     - name: Clean Artifacts
-      if: ${{ env.BUILD_TARGETS != '' }}
       run: |
         git clean -xdf
 
     - name: Perform CodeQL Analysis
-      if: ${{ env.BUILD_TARGETS != '' }}
-      uses: github/codeql-action/analyze@4dd16135b69a43b6c8efb853346f8437d92d3c93  # codeql-bundle-v3.26.6
+      # if: ${{ env.BUILD_TARGETS != '' }}
+      uses: github/codeql-action/analyze@b20883b0cd1f46c72ae0ba6d1090936928f9fa30  # codeql-bundle-v4.32.0

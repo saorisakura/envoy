@@ -32,9 +32,8 @@ EdsClusterImpl::EdsClusterImpl(const envoy::config::cluster::v3::Cluster& cluste
           cluster_context.messageValidationVisitor(), "cluster_name"),
       local_info_(cluster_context.serverFactoryContext().localInfo()),
       eds_resources_cache_(
-          Runtime::runtimeFeatureEnabled("envoy.restart_features.use_eds_cache_for_ads")
-              ? cluster_context.clusterManager().edsResourcesCache()
-              : absl::nullopt) {
+          cluster_context.serverFactoryContext().clusterManager().edsResourcesCache()) {
+  RETURN_ONLY_IF_NOT_OK_REF(creation_status);
   Event::Dispatcher& dispatcher = cluster_context.serverFactoryContext().mainThreadDispatcher();
   assignment_timeout_ = dispatcher.createTimer([this]() -> void { onAssignmentTimeout(); });
   const auto& eds_config = cluster.eds_cluster_config().eds_config();
@@ -45,11 +44,22 @@ EdsClusterImpl::EdsClusterImpl(const envoy::config::cluster::v3::Cluster& cluste
     initialize_phase_ = InitializePhase::Secondary;
   }
   const auto resource_name = getResourceName();
-  subscription_ = THROW_OR_RETURN_VALUE(
-      cluster_context.clusterManager().subscriptionFactory().subscriptionFromConfigSource(
-          eds_config, Grpc::Common::typeUrl(resource_name), info_->statsScope(), *this,
-          resource_decoder_, {}),
-      Config::SubscriptionPtr);
+  if (Runtime::runtimeFeatureEnabled(
+          "envoy.reloadable_features.xdstp_based_config_singleton_subscriptions")) {
+    subscription_ = THROW_OR_RETURN_VALUE(
+        cluster_context.serverFactoryContext().xdsManager().subscribeToSingletonResource(
+            edsServiceName(), eds_config, Grpc::Common::typeUrl(resource_name), info_->statsScope(),
+            *this, resource_decoder_, {}),
+        Config::SubscriptionPtr);
+  } else {
+    subscription_ = THROW_OR_RETURN_VALUE(
+        cluster_context.serverFactoryContext()
+            .clusterManager()
+            .subscriptionFactory()
+            .subscriptionFromConfigSource(eds_config, Grpc::Common::typeUrl(resource_name),
+                                          info_->statsScope(), *this, resource_decoder_, {}),
+        Config::SubscriptionPtr);
+  }
 }
 
 EdsClusterImpl::~EdsClusterImpl() {
@@ -63,11 +73,8 @@ void EdsClusterImpl::startPreInit() { subscription_->start({edsServiceName()}); 
 
 void EdsClusterImpl::BatchUpdateHelper::batchUpdate(PrioritySet::HostUpdateCb& host_update_cb) {
   absl::flat_hash_set<std::string> all_new_hosts;
-  PriorityStateManager priority_state_manager(parent_, parent_.local_info_, &host_update_cb,
-                                              parent_.random_);
+  PriorityStateManager priority_state_manager(parent_, parent_.local_info_, &host_update_cb);
   for (const auto& locality_lb_endpoint : cluster_load_assignment_.endpoints()) {
-    THROW_IF_NOT_OK(parent_.validateEndpointsForZoneAwareRouting(locality_lb_endpoint));
-
     priority_state_manager.initializePriorityFor(locality_lb_endpoint);
 
     if (locality_lb_endpoint.has_leds_cluster_locality_config()) {
@@ -109,6 +116,7 @@ void EdsClusterImpl::BatchUpdateHelper::batchUpdate(PrioritySet::HostUpdateCb& h
 
   // Loop over all priorities that exist in the new configuration.
   auto& priority_state = priority_state_manager.priorityState();
+  THROW_IF_NOT_OK(parent_.validateEndpoints(cluster_load_assignment_.endpoints(), priority_state));
   for (size_t i = 0; i < priority_state.size(); ++i) {
     if (parent_.locality_weights_map_.size() <= i) {
       parent_.locality_weights_map_.resize(i + 1);
@@ -160,9 +168,15 @@ void EdsClusterImpl::BatchUpdateHelper::updateLocalityEndpoints(
   if (!lb_endpoint.endpoint().additional_addresses().empty()) {
     address_list.push_back(address);
     for (const auto& additional_address : lb_endpoint.endpoint().additional_addresses()) {
-      address_list.emplace_back(
-          THROW_OR_RETURN_VALUE(parent_.resolveProtoAddress(additional_address.address()),
-                                const Network::Address::InstanceConstSharedPtr));
+      Network::Address::InstanceConstSharedPtr address =
+          returnOrThrow(parent_.resolveProtoAddress(additional_address.address()));
+      address_list.emplace_back(address);
+    }
+    for (const Network::Address::InstanceConstSharedPtr& address : address_list) {
+      // All addresses must by IP addresses.
+      if (!address->ip()) {
+        throwEnvoyExceptionOrPanic("additional_addresses must be IP addresses.");
+      }
     }
   }
 
@@ -173,8 +187,7 @@ void EdsClusterImpl::BatchUpdateHelper::updateLocalityEndpoints(
   }
 
   priority_state_manager.registerHostForPriority(lb_endpoint.endpoint().hostname(), address,
-                                                 address_list, locality_lb_endpoint, lb_endpoint,
-                                                 parent_.time_source_);
+                                                 address_list, locality_lb_endpoint, lb_endpoint);
   all_new_hosts.emplace(address_as_string);
 }
 
@@ -232,18 +245,11 @@ EdsClusterImpl::onConfigUpdate(const std::vector<Config::DecodedResourceRef>& re
     }
   }
 
-  // Drop overload configuration parsing.
-  absl::Status status = parseDropOverloadConfig(cluster_load_assignment);
-  if (!status.ok()) {
-    return status;
-  }
-
   // Pause LEDS messages until the EDS config is finished processing.
   Config::ScopedResume maybe_resume_leds;
-  if (transport_factory_context_->clusterManager().adsMux()) {
-    const auto type_url = Config::getTypeUrl<envoy::config::endpoint::v3::LbEndpoint>();
-    maybe_resume_leds = transport_factory_context_->clusterManager().adsMux()->pause(type_url);
-  }
+  const auto type_url = Config::getTypeUrl<envoy::config::endpoint::v3::LbEndpoint>();
+  Config::ScopedResume resume_leds =
+      transport_factory_context_->serverFactoryContext().xdsManager().pause(type_url);
 
   update(cluster_load_assignment);
   // If previously used a cached version, remove the subscription from the cache's
@@ -257,6 +263,9 @@ EdsClusterImpl::onConfigUpdate(const std::vector<Config::DecodedResourceRef>& re
 
 void EdsClusterImpl::update(
     const envoy::config::endpoint::v3::ClusterLoadAssignment& cluster_load_assignment) {
+  // Drop overload configuration parsing.
+  THROW_IF_NOT_OK(parseDropOverloadConfig(cluster_load_assignment));
+
   // Compare the current set of LEDS localities (localities using LEDS) to the one received in the
   // update. A LEDS locality can either be added, removed, or kept. If it is added we add a
   // subscription to it, and if it is removed we delete the subscription.
@@ -388,10 +397,9 @@ void EdsClusterImpl::reloadHealthyHostsHelper(const HostSharedPtr& host) {
     HostsPerLocalityConstSharedPtr hosts_per_locality_copy = host_set->hostsPerLocality().filter(
         {[&host_to_exclude](const Host& host) { return &host != host_to_exclude.get(); }})[0];
 
-    prioritySet().updateHosts(priority,
-                              HostSetImpl::partitionHosts(hosts_copy, hosts_per_locality_copy),
-                              host_set->localityWeights(), {}, hosts_to_remove, random_.random(),
-                              absl::nullopt, absl::nullopt);
+    prioritySet().updateHosts(
+        priority, HostSetImpl::partitionHosts(hosts_copy, hosts_per_locality_copy),
+        host_set->localityWeights(), {}, hosts_to_remove, absl::nullopt, absl::nullopt);
   }
 }
 
@@ -405,6 +413,8 @@ bool EdsClusterImpl::updateHostsPerLocality(
 
   HostVector hosts_added;
   HostVector hosts_removed;
+  hosts_added.reserve(new_hosts.size());
+  hosts_removed.reserve(host_set.hosts().size());
   // We need to trigger updateHosts with the new host vectors if they have changed. We also do this
   // when the locality weight map or the overprovisioning factor. Note calling updateDynamicHostList
   // is responsible for both determining whether there was a change and to perform the actual update

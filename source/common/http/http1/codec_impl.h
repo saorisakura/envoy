@@ -90,6 +90,9 @@ public:
 
   const StreamInfo::BytesMeterSharedPtr& bytesMeter() override { return bytes_meter_; }
 
+  // http1 doesn't have a codec level stream id.
+  absl::optional<uint32_t> codecStreamId() const override { return absl::nullopt; }
+
 protected:
   StreamEncoderImpl(ConnectionImpl& connection, StreamInfo::BytesMeterSharedPtr&& bytes_meter);
   void encodeHeadersBase(const RequestOrResponseHeaderMap& headers, absl::optional<uint64_t> status,
@@ -272,7 +275,7 @@ public:
   Envoy::Http::Status codec_status_;
 
   // ScopeTrackedObject
-  ExecutionContext* executionContext() const override;
+  OptRef<const StreamInfo::StreamInfo> trackedStream() const override;
   void dumpState(std::ostream& os, int indent_level) const override;
 
 protected:
@@ -345,18 +348,6 @@ private:
    * @return A status representing success.
    */
   Status completeCurrentHeader();
-
-  /**
-   * Check if header name contains underscore character.
-   * Underscore character is allowed in header names by the RFC-7230 and this check is implemented
-   * as a security measure due to systems that treat '_' and '-' as interchangeable.
-   * The ServerConnectionImpl may drop header or reject request based on the
-   * `common_http_protocol_options.headers_with_underscores_action` configuration option in the
-   * HttpConnectionManager.
-   */
-  virtual bool shouldDropHeaderWithUnderscoresInNames(absl::string_view /* header_name */) const {
-    return false;
-  }
 
   /**
    * Dispatch a memory span.
@@ -488,7 +479,6 @@ protected:
     ResponseEncoderImpl response_encoder_;
     bool remote_complete_{};
   };
-  ActiveRequest* activeRequest() { return active_request_.get(); }
   // ConnectionImpl
   CallbackResult onMessageCompleteBase() override;
   // Add the size of the request_url to the reported header size when processing request headers.
@@ -542,7 +532,6 @@ private:
     return *absl::get<RequestHeaderMapPtr>(headers_or_trailers_);
   }
   void allocHeaders(StatefulHeaderKeyFormatterPtr&& formatter) override {
-    ASSERT(nullptr == absl::get<RequestHeaderMapPtr>(headers_or_trailers_));
     ASSERT(!processing_trailers_);
     auto headers = RequestHeaderMapImpl::create(max_headers_kb_, max_headers_count_);
     headers->setFormatter(std::move(formatter));
@@ -590,6 +579,7 @@ class ClientConnectionImpl : public ClientConnection, public ConnectionImpl {
 public:
   ClientConnectionImpl(Network::Connection& connection, CodecStats& stats,
                        ConnectionCallbacks& callbacks, const Http1Settings& settings,
+                       absl::optional<uint16_t> max_response_headers_kb,
                        const uint32_t max_response_headers_count,
                        bool passing_through_proxy = false);
   // Http::ClientConnection

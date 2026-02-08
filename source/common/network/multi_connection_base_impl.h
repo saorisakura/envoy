@@ -81,6 +81,7 @@ public:
   void addReadFilter(ReadFilterSharedPtr filter) override;
   void removeReadFilter(ReadFilterSharedPtr filter) override;
   bool initializeReadFilters() override;
+  void addAccessLogHandler(AccessLog::InstanceSharedPtr handler) override;
   void addBytesSentCallback(BytesSentCb cb) override;
   void write(Buffer::Instance& data, bool end_stream) override;
   void addConnectionCallbacks(ConnectionCallbacks& cb) override;
@@ -101,6 +102,7 @@ public:
 
   // Simple getters which always delegate to the first connection in connections_.
   bool isHalfCloseEnabled() const override;
+  bool setSocketOption(Network::SocketOptionName name, absl::Span<uint8_t> value) override;
   std::string nextProtocol() const override;
   // Note, this might change before connect finishes.
   ConnectionInfoSetter& connectionInfoSetter() override;
@@ -127,11 +129,13 @@ public:
   Event::Dispatcher& dispatcher() const override;
   void close(ConnectionCloseType type) override { close(type, ""); }
   void close(ConnectionCloseType type, absl::string_view details) override;
-  DetectedCloseType detectedCloseType() const override;
+  StreamInfo::DetectedCloseType detectedCloseType() const override;
   bool readEnabled() const override;
   bool aboveHighWatermark() const override;
   void hashKey(std::vector<uint8_t>& hash_key) const override;
   void dumpState(std::ostream& os, int indent_level) const override;
+
+  const Network::ConnectionSocketPtr& getSocket() const override { PANIC("not implemented"); }
 
 private:
   // ConnectionCallbacks which will be set on an ClientConnection which
@@ -211,6 +215,7 @@ private:
     std::vector<ReadFilterSharedPtr> read_filters_;
     std::vector<WriteFilterSharedPtr> write_filters_;
     std::vector<FilterSharedPtr> filters_;
+    std::vector<AccessLog::InstanceSharedPtr> access_log_handlers_;
     absl::optional<Buffer::InstancePtr> write_buffer_;
     absl::optional<int> read_disable_count_;
     absl::optional<bool> end_stream_;

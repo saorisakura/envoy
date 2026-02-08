@@ -7,6 +7,7 @@
 #include "envoy/http/header_validator.h"
 #include "envoy/http/original_ip_detection.h"
 #include "envoy/http/request_id_extension.h"
+#include "envoy/matcher/matcher.h"
 #include "envoy/router/rds.h"
 #include "envoy/router/scopes.h"
 #include "envoy/stats/scope.h"
@@ -18,6 +19,9 @@
 #include "source/common/network/utility.h"
 #include "source/common/stats/symbol_table.h"
 #include "source/common/tracing/tracer_config_impl.h"
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 
 namespace Envoy {
 namespace Http {
@@ -126,7 +130,7 @@ struct ConnectionManagerTracingStats {
   CONN_MAN_TRACING_STATS(GENERATE_COUNTER_STRUCT)
 };
 
-using TracingConnectionManagerConfig = Tracing::ConnectionManagerTracingConfigImpl;
+using TracingConnectionManagerConfig = Tracing::ConnectionManagerTracingConfig;
 using TracingConnectionManagerConfigPtr = std::unique_ptr<TracingConnectionManagerConfig>;
 
 /**
@@ -190,9 +194,7 @@ public:
  */
 class DefaultInternalAddressConfig : public Http::InternalAddressConfig {
 public:
-  bool isInternalAddress(const Network::Address::Instance& address) const override {
-    return Network::Utility::isInternalAddress(address);
-  }
+  bool isInternalAddress(const Network::Address::Instance&) const override { return false; }
 };
 
 /**
@@ -213,7 +215,7 @@ public:
   /**
    *  @return const std::list<AccessLog::InstanceSharedPtr>& the access logs to write to.
    */
-  virtual const std::list<AccessLog::InstanceSharedPtr>& accessLogs() PURE;
+  virtual const AccessLog::InstanceSharedPtrVector& accessLogs() PURE;
 
   /**
    * @return const absl::optional<std::chrono::milliseconds>& the interval to flush the access logs.
@@ -312,6 +314,12 @@ public:
    *         disabled idle timeout.
    */
   virtual std::chrono::milliseconds streamIdleTimeout() const PURE;
+
+  /**
+   * @return per-stream flush timeout for incoming connection manager connections. Zero indicates a
+   *         disabled idle timeout.
+   */
+  virtual absl::optional<std::chrono::milliseconds> streamFlushTimeout() const PURE;
 
   /**
    * @return request timeout for incoming connection manager connections. Zero indicates
@@ -429,6 +437,13 @@ public:
   virtual const std::vector<ClientCertDetailsType>& setCurrentClientCertDetails() const PURE;
 
   /**
+   * @return the matcher for selecting forward client cert config per-request. Returns nullptr
+   * if no matcher is configured, in which case the static forwardClientCert() and
+   * setCurrentClientCertDetails() should be used.
+   */
+  virtual const Matcher::MatchTreePtr<HttpMatchingData>& forwardClientCertMatcher() const PURE;
+
+  /**
    * @return local address.
    * Gives richer information in case of internal requests.
    */
@@ -524,7 +539,7 @@ public:
   /**
    * @return maximum requests for downstream.
    */
-  virtual uint64_t maxRequestsPerConnection() const PURE;
+  virtual uint32_t maxRequestsPerConnection() const PURE;
   /**
    * @return the config describing if/how to write the Proxy-Status HTTP response header.
    * If nullptr, don't write the Proxy-Status HTTP response header.
@@ -556,6 +571,18 @@ public:
    *         Connection Lifetime.
    */
   virtual bool addProxyProtocolConnectionState() const PURE;
+
+  /**
+   * @return a set of destination ports that should be treated as HTTPS when the
+   *         local address was restored from PROXY protocol.
+   */
+  virtual const absl::flat_hash_set<uint32_t>& httpsDestinationPorts() const PURE;
+
+  /**
+   * @return a set of destination ports that should be treated as HTTP when the
+   *         local address was restored from PROXY protocol.
+   */
+  virtual const absl::flat_hash_set<uint32_t>& httpDestinationPorts() const PURE;
 };
 
 using ConnectionManagerConfigSharedPtr = std::shared_ptr<ConnectionManagerConfig>;

@@ -20,7 +20,17 @@ Http::FilterFactoryCb OnDemandFilterFactory::createFilterFactoryFromProtoTyped(
   };
 }
 
-Router::RouteSpecificFilterConfigConstSharedPtr
+Http::FilterFactoryCb OnDemandFilterFactory::createFilterFactoryFromProtoWithServerContextTyped(
+    const envoy::extensions::filters::http::on_demand::v3::OnDemand& proto_config,
+    const std::string&, Server::Configuration::ServerFactoryContext& context) {
+  OnDemandFilterConfigSharedPtr config = std::make_shared<OnDemandFilterConfig>(
+      proto_config, context.clusterManager(), context.messageValidationVisitor());
+  return [config](Http::FilterChainFactoryCallbacks& callbacks) -> void {
+    callbacks.addStreamDecoderFilter(std::make_shared<OnDemandRouteUpdate>(config));
+  };
+}
+
+absl::StatusOr<Router::RouteSpecificFilterConfigConstSharedPtr>
 OnDemandFilterFactory::createRouteSpecificFilterConfigTyped(
     const envoy::extensions::filters::http::on_demand::v3::PerRouteConfig& proto_config,
     Server::Configuration::ServerFactoryContext& context,

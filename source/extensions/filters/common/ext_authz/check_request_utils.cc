@@ -274,7 +274,8 @@ void CheckRequestUtils::createHttpCheck(
 void CheckRequestUtils::createTcpCheck(
     const Network::ReadFilterCallbacks* callbacks, envoy::service::auth::v3::CheckRequest& request,
     bool include_peer_certificate, bool include_tls_session,
-    const Protobuf::Map<std::string, std::string>& destination_labels) {
+    const Protobuf::Map<std::string, std::string>& destination_labels,
+    envoy::config::core::v3::Metadata&& metadata_context) {
 
   auto attrs = request.mutable_attributes();
 
@@ -290,6 +291,8 @@ void CheckRequestUtils::createTcpCheck(
     setTLSSession(*attrs->mutable_tls_session(), cb->connection());
   }
   (*attrs->mutable_destination()->mutable_labels()) = destination_labels;
+  // Fill in the metadata context.
+  (*attrs->mutable_metadata_context()) = std::move(metadata_context);
 }
 
 MatcherSharedPtr
@@ -306,9 +309,7 @@ CheckRequestUtils::toRequestMatchers(const envoy::type::matcher::v3::ListStringM
     for (const auto& key : keys) {
       envoy::type::matcher::v3::StringMatcher matcher;
       matcher.set_exact(key.get());
-      matchers.push_back(
-          std::make_unique<Matchers::StringMatcherImpl<envoy::type::matcher::v3::StringMatcher>>(
-              matcher, context));
+      matchers.push_back(std::make_unique<Matchers::StringMatcherImpl>(matcher, context));
     }
   }
 
@@ -320,9 +321,7 @@ CheckRequestUtils::createStringMatchers(const envoy::type::matcher::v3::ListStri
                                         Server::Configuration::CommonFactoryContext& context) {
   std::vector<Matchers::StringMatcherPtr> matchers;
   for (const auto& matcher : list.patterns()) {
-    matchers.push_back(
-        std::make_unique<Matchers::StringMatcherImpl<envoy::type::matcher::v3::StringMatcher>>(
-            matcher, context));
+    matchers.push_back(std::make_unique<Matchers::StringMatcherImpl>(matcher, context));
   }
   return matchers;
 }

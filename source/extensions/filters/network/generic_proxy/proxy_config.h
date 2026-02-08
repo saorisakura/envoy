@@ -1,8 +1,10 @@
 #pragma once
 
+#include "envoy/access_log/access_log_config.h"
 #include "envoy/tracing/trace_config.h"
 #include "envoy/tracing/tracer.h"
 
+#include "source/common/tracing/tracer_config_impl.h"
 #include "source/extensions/filters/network/generic_proxy/access_log.h"
 #include "source/extensions/filters/network/generic_proxy/interface/codec.h"
 #include "source/extensions/filters/network/generic_proxy/interface/filter.h"
@@ -62,7 +64,7 @@ public:
   /**
    * @return const std::vector<AccessLogInstanceSharedPtr>& access logs.
    */
-  virtual const std::vector<AccessLogInstanceSharedPtr>& accessLogs() const PURE;
+  virtual const AccessLog::InstanceSharedPtrVector& accessLogs() const PURE;
 };
 
 } // namespace GenericProxy

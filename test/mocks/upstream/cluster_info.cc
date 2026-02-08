@@ -31,9 +31,10 @@ MockIdleTimeEnabledClusterInfo::~MockIdleTimeEnabledClusterInfo() = default;
 MockUpstreamLocalAddressSelector::MockUpstreamLocalAddressSelector(
     Network::Address::InstanceConstSharedPtr& address)
     : address_(address) {
-  ON_CALL(*this, getUpstreamLocalAddressImpl(_))
+  ON_CALL(*this, getUpstreamLocalAddressImpl(_, _))
       .WillByDefault(
-          Invoke([&](const Network::Address::InstanceConstSharedPtr&) -> UpstreamLocalAddress {
+          Invoke([&](const Network::Address::InstanceConstSharedPtr&,
+                     OptRef<const Network::TransportSocketOptions>) -> UpstreamLocalAddress {
             UpstreamLocalAddress ret;
             ret.address_ = address_;
             ret.socket_options_ = nullptr;
@@ -88,14 +89,20 @@ MockClusterInfo::MockClusterInfo()
   ON_CALL(*this, loadBalancerFactory()).WillByDefault(Invoke([this]() -> TypedLoadBalancerFactory& {
     return *lb_factory_;
   }));
-  ON_CALL(*this, http1Settings()).WillByDefault(ReturnRef(http1_settings_));
-  ON_CALL(*this, http2Options()).WillByDefault(ReturnRef(http2_options_));
-  ON_CALL(*this, http3Options()).WillByDefault(ReturnRef(http3_options_));
-  ON_CALL(*this, commonHttpProtocolOptions())
-      .WillByDefault(ReturnRef(common_http_protocol_options_));
+  ON_CALL(*this, loadBalancerConfig())
+      .WillByDefault(Invoke([this]() -> OptRef<const LoadBalancerConfig> {
+        return makeOptRefFromPtr<LoadBalancerConfig>(typed_lb_config_.get());
+      }));
   ON_CALL(*this, extensionProtocolOptions(_)).WillByDefault(Return(extension_protocol_options_));
   ON_CALL(*this, maxResponseHeadersCount())
       .WillByDefault(ReturnPointee(&max_response_headers_count_));
+  ON_CALL(*this, maxResponseHeadersKb()).WillByDefault(Invoke([this]() -> absl::optional<uint16_t> {
+    if (common_http_protocol_options_.has_max_response_headers_kb()) {
+      return common_http_protocol_options_.max_response_headers_kb().value();
+    } else {
+      return absl::nullopt;
+    }
+  }));
   ON_CALL(*this, maxRequestsPerConnection())
       .WillByDefault(ReturnPointee(&max_requests_per_connection_));
   ON_CALL(*this, trafficStats()).WillByDefault(ReturnRef(traffic_stats_));
@@ -130,10 +137,6 @@ MockClusterInfo::MockClusterInfo()
 
   ON_CALL(*this, lbConfig()).WillByDefault(ReturnRef(lb_config_));
   ON_CALL(*this, metadata()).WillByDefault(ReturnRef(metadata_));
-  ON_CALL(*this, upstreamHttpProtocolOptions())
-      .WillByDefault(ReturnRef(upstream_http_protocol_options_));
-  ON_CALL(*this, alternateProtocolsCacheOptions())
-      .WillByDefault(ReturnRef(alternate_protocols_cache_options_));
   // Delayed construction of typed_metadata_, to allow for injection of metadata
   ON_CALL(*this, typedMetadata())
       .WillByDefault(Invoke([this]() -> const Envoy::Config::TypedMetadata& {
@@ -151,21 +154,8 @@ MockClusterInfo::MockClusterInfo()
           }));
   ON_CALL(*this, upstreamHttpProtocol(_))
       .WillByDefault(Return(std::vector<Http::Protocol>{Http::Protocol::Http11}));
-  ON_CALL(*this, createFilterChain(_, _, _))
-      .WillByDefault(Invoke([&](Http::FilterChainManager& manager, bool only_create_if_configured,
-                                const Http::FilterChainOptions&) -> bool {
-        if (only_create_if_configured) {
-          return false;
-        }
-        Http::FilterFactoryCb factory_cb =
-            [](Http::FilterChainFactoryCallbacks& callbacks) -> void {
-          callbacks.addStreamDecoderFilter(std::make_shared<Router::UpstreamCodecFilter>());
-        };
-        manager.applyFilterFactoryCb({}, factory_cb);
-        return true;
-      }));
-  ON_CALL(*this, loadBalancerConfig())
-      .WillByDefault(Return(makeOptRefFromPtr<const LoadBalancerConfig>(nullptr)));
+  ON_CALL(*this, createFilterChain(_))
+      .WillByDefault(Invoke([&](Http::FilterChainFactoryCallbacks&) -> bool { return false; }));
   ON_CALL(*this, makeHeaderValidator(_)).WillByDefault(Invoke([&](Http::Protocol protocol) {
     return header_validator_factory_ ? header_validator_factory_->createClientHeaderValidator(
                                            protocol, codecStats(protocol))

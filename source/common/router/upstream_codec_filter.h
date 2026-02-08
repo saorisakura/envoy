@@ -13,8 +13,11 @@
 
 #include "source/common/common/logger.h"
 #include "source/common/config/well_known_names.h"
+#include "source/common/router/upstream_to_downstream_impl_base.h"
 #include "source/common/runtime/runtime_features.h"
 #include "source/extensions/filters/http/common/factory_base.h"
+
+#include "absl/status/status.h"
 
 namespace Envoy {
 namespace Router {
@@ -28,7 +31,7 @@ class UpstreamCodecFilter : public Http::StreamDecoderFilter,
                             public Http::DownstreamWatermarkCallbacks,
                             public Http::UpstreamCallbacks {
 public:
-  UpstreamCodecFilter() : bridge_(*this), calling_encode_headers_(false), deferred_reset_(false) {}
+  UpstreamCodecFilter() : bridge_(*this), deferred_reset_status_(absl::OkStatus()) {}
 
   // Http::DownstreamWatermarkCallbacks
   void onBelowWriteBufferLowWatermark() override;
@@ -49,7 +52,7 @@ public:
   void setDecoderFilterCallbacks(Http::StreamDecoderFilterCallbacks& callbacks) override;
 
   // This bridge connects the upstream stream to the filter manager.
-  class CodecBridge : public UpstreamToDownstream {
+  class CodecBridge : public UpstreamToDownstreamImplBase {
   public:
     CodecBridge(UpstreamCodecFilter& filter) : filter_(filter) {}
     void decode1xxHeaders(Http::ResponseHeaderMapPtr&& headers) override;
@@ -58,26 +61,9 @@ public:
     void decodeTrailers(Http::ResponseTrailerMapPtr&& trailers) override;
     void decodeMetadata(Http::MetadataMapPtr&&) override;
     void dumpState(std::ostream& os, int indent_level) const override;
-
     void onResetStream(Http::StreamResetReason reason,
-                       absl::string_view transport_failure_reason) override {
-      if (filter_.calling_encode_headers_) {
-        filter_.deferred_reset_ = true;
-        return;
-      }
-      std::string failure_reason(transport_failure_reason);
-      if (reason == Http::StreamResetReason::LocalReset) {
-        if (!Runtime::runtimeFeatureEnabled(
-                "envoy.reloadable_features.report_stream_reset_error_code")) {
-          ASSERT(transport_failure_reason.empty());
-          // Use this to communicate to the upstream request to not force-terminate.
-          failure_reason = "codec_error";
-        } else {
-          failure_reason = absl::StrCat(transport_failure_reason, "|codec_error");
-        }
-      }
-      filter_.callbacks_->resetStream(reason, failure_reason);
-    }
+                       absl::string_view transport_failure_reason) override;
+
     void onAboveWriteBufferHighWatermark() override {
       filter_.callbacks_->onDecoderFilterAboveWriteBufferHighWatermark();
     }
@@ -96,15 +82,16 @@ public:
   private:
     void maybeEndDecode(bool end_stream);
     bool seen_1xx_headers_{};
+    bool first_body_rx_recorded_{};
     UpstreamCodecFilter& filter_;
   };
   Http::StreamDecoderFilterCallbacks* callbacks_;
   CodecBridge bridge_;
   OptRef<Http::RequestHeaderMap> latched_headers_;
-  // Keep small members (bools and enums) at the end of class, to reduce alignment overhead.
-  bool calling_encode_headers_ : 1;
-  bool deferred_reset_ : 1;
+  absl::Status deferred_reset_status_;
   absl::optional<bool> latched_end_stream_;
+  // Keep small members (bools and enums) at the end of class, to reduce alignment overhead.
+  bool calling_encode_headers_ = false;
 
 private:
   StreamInfo::UpstreamTiming& upstreamTiming() {
@@ -135,6 +122,8 @@ public:
 };
 
 DECLARE_FACTORY(UpstreamCodecFilterFactory);
+
+const Http::FilterChainFactory& defaultUpstreamHttpFilterChainFactory();
 
 } // namespace Router
 } // namespace Envoy

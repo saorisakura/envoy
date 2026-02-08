@@ -28,7 +28,11 @@ class EnvoyQuicClientSession : public QuicFilterManagerConnectionImpl,
 public:
   EnvoyQuicClientSession(
       const quic::QuicConfig& config, const quic::ParsedQuicVersionVector& supported_versions,
-      std::unique_ptr<EnvoyQuicClientConnection> connection, const quic::QuicServerId& server_id,
+      std::unique_ptr<EnvoyQuicClientConnection> connection,
+      quic::QuicForceBlockablePacketWriter* absl_nullable writer,
+      EnvoyQuicClientConnection::EnvoyQuicMigrationHelper* absl_nullable migration_helper,
+      const quic::QuicConnectionMigrationConfig& migration_config,
+      const quic::QuicServerId& server_id,
       std::shared_ptr<quic::QuicCryptoClientConfig> crypto_config, Event::Dispatcher& dispatcher,
       uint32_t send_buffer_limit,
       EnvoyQuicCryptoClientStreamFactoryInterface& crypto_stream_factory,
@@ -54,6 +58,10 @@ public:
   // Set up socket and start handshake.
   void connect() override;
 
+  bool setSocketOption(Envoy::Network::SocketOptionName, absl::Span<uint8_t>) override {
+    return false;
+  }
+
   // quic::QuicSession
   void OnConnectionClosed(const quic::QuicConnectionCloseFrame& frame,
                           quic::ConnectionCloseSource source) override;
@@ -65,8 +73,12 @@ public:
   void OnNewEncryptionKeyAvailable(quic::EncryptionLevel level,
                                    std::unique_ptr<quic::QuicEncrypter> encrypter) override;
 
+  // quic::QuicClientSessionWithMigration
+  void StartDraining() override;
+
   quic::HttpDatagramSupport LocalHttpDatagramSupport() override { return http_datagram_support_; }
   std::vector<std::string> GetAlpnsToOffer() const override;
+  void OnConfigNegotiated() override;
 
   // quic::QuicSpdyClientSessionBase
   bool ShouldKeepConnectionAlive() const override;
@@ -75,8 +87,7 @@ public:
 
   // PacketsToReadDelegate
   size_t numPacketsExpectedPerEventLoop() const override {
-    // Do one round of reading per active stream, or to see if there's a new
-    // active stream.
+    // Do one round of reading per active stream, or to see if there's a new active stream.
     return std::max<size_t>(1, GetNumActiveStreams()) * Network::NUM_DATAGRAMS_PER_RECEIVE;
   }
 
@@ -91,6 +102,10 @@ public:
 
   // Register this session to the given registry for receiving network change events.
   void registerNetworkObserver(EnvoyQuicNetworkObserverRegistry& registry);
+
+  const quic::TransportParameters::ParameterMap& received_custom_transport_parameters() {
+    return received_custom_transport_parameters_;
+  }
 
   using quic::QuicSpdyClientSession::PerformActionOnActiveStreams;
 
@@ -127,8 +142,10 @@ private:
   OptRef<QuicTransportSocketFactoryBase> transport_socket_factory_;
   std::vector<std::string> configured_alpns_;
   quic::HttpDatagramSupport http_datagram_support_ = quic::HttpDatagramSupport::kNone;
+  const bool session_handles_migration_;
   QuicNetworkConnectivityObserverPtr network_connectivity_observer_;
   OptRef<EnvoyQuicNetworkObserverRegistry> registry_;
+  quic::TransportParameters::ParameterMap received_custom_transport_parameters_;
 };
 
 } // namespace Quic

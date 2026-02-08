@@ -19,7 +19,7 @@ public:
       : rand_lock_(rand_lock), rng_(rng) {}
 
   Http::FilterDataStatus encodeData(Buffer::Instance& buf, bool end_stream) override {
-    absl::WriterMutexLock m(&rand_lock_);
+    absl::WriterMutexLock m(rand_lock_);
     uint64_t random = rng_.random();
     // Roughly every 5th encode (5 being arbitrary) swap the watermark state.
     if (random % 5 == 0) {
@@ -27,11 +27,13 @@ public:
         connection()->onWriteBufferLowWatermark();
       } else {
         connection()->onWriteBufferHighWatermark();
+        armLowWatermarkTimer();
       }
     }
     return Http::PassThroughFilter::encodeData(buf, end_stream);
   }
 
+private:
   Network::ConnectionImpl* connection() {
     // As long as we're doing horrible things let's do *all* the horrible things.
     // Assert the connection we have is a ConnectionImpl and const cast it so we
@@ -41,8 +43,26 @@ public:
     return const_cast<Network::ConnectionImpl*>(conn_impl);
   }
 
+  // Since we deferred processing data, when the filter raises watermark with
+  // deferred processing the filter chain manager won't invoke it again which
+  // could lower the watermark.
+  void armLowWatermarkTimer() {
+    if (timer_ == nullptr) {
+      timer_ = connection()->dispatcher().createTimer([this]() {
+        if (connection()->aboveHighWatermark()) {
+          connection()->onWriteBufferLowWatermark();
+        }
+      });
+    }
+
+    if (!timer_->enabled()) {
+      timer_->enableHRTimer(std::chrono::microseconds(rng_.random() % 10));
+    }
+  }
+
   absl::Mutex& rand_lock_;
   TestRandomGenerator& rng_;
+  Event::TimerPtr timer_;
 };
 
 class RandomPauseFilterConfig : public Extensions::HttpFilters::Common::EmptyHttpFilterConfig {
@@ -52,7 +72,7 @@ public:
   absl::StatusOr<Http::FilterFactoryCb>
   createFilter(const std::string&, Server::Configuration::FactoryContext&) override {
     return [&](Http::FilterChainFactoryCallbacks& callbacks) -> void {
-      absl::WriterMutexLock m(&rand_lock_);
+      absl::WriterMutexLock m(rand_lock_);
       if (rng_ == nullptr) {
         // Lazily create to ensure the test seed is set.
         rng_ = std::make_unique<TestRandomGenerator>();

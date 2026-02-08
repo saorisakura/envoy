@@ -11,13 +11,6 @@ def envoy_cc_platform_dep(name):
         "//conditions:default": [name + "_posix"],
     })
 
-def envoy_select_boringssl(if_fips, default = None, if_disabled = None):
-    return select({
-        "@envoy//bazel:boringssl_fips": if_fips,
-        "@envoy//bazel:boringssl_disabled": if_disabled or [],
-        "//conditions:default": default or [],
-    })
-
 # Selects the given values if Google gRPC is enabled in the current build.
 def envoy_select_google_grpc(xs, repository = ""):
     return select({
@@ -63,6 +56,13 @@ def envoy_select_static_extension_registration(xs, repository = ""):
 def envoy_select_envoy_mobile_listener(xs, repository = ""):
     return select({
         repository + "//bazel:disable_envoy_mobile_listener": [],
+        "//conditions:default": xs,
+    })
+
+# Selects the given values if Envoy Mobile xDS is enabled in the current build.
+def envoy_select_envoy_mobile_xds(xs, repository = ""):
+    return select({
+        repository + "//bazel:disable_envoy_mobile_xds": [],
         "//conditions:default": xs,
     })
 
@@ -149,9 +149,6 @@ def envoy_select_wasm_cpp_tests(xs):
 def envoy_select_wasm_rust_tests(xs):
     return select({
         "@envoy//bazel:wasm_disabled": [],
-        # TODO(phlax): re-enable once issues with llvm profiler are resolved
-        #   (see https://github.com/envoyproxy/envoy/issues/24164)
-        "@envoy//bazel:coverage_build": [],
         "//conditions:default": xs,
     })
 
@@ -162,9 +159,6 @@ def envoy_select_wasm_v8(xs):
         "@envoy//bazel:wasm_wamr": [],
         "@envoy//bazel:wasm_wasmtime": [],
         "@envoy//bazel:wasm_disabled": [],
-        # TODO(phlax): re-enable once issues with llvm profiler are resolved
-        #   (see https://github.com/envoyproxy/envoy/issues/24164)
-        "@envoy//bazel:coverage_build": [],
         "//conditions:default": xs,  # implicit default (v8)
     })
 
@@ -175,9 +169,6 @@ def envoy_select_wasm_v8_bool():
         "@envoy//bazel:wasm_wamr": False,
         "@envoy//bazel:wasm_wasmtime": False,
         "@envoy//bazel:wasm_disabled": False,
-        # TODO(phlax): re-enable once issues with llvm profiler are resolved
-        #   (see https://github.com/envoyproxy/envoy/issues/24164)
-        "@envoy//bazel:coverage_build": False,
         "//conditions:default": True,  # implicit default (v8)
     })
 

@@ -15,6 +15,7 @@
 #include "test/benchmark/main.h"
 #include "test/common/upstream/utility.h"
 #include "test/extensions/load_balancing_policies/common/benchmark_base_tester.h"
+#include "test/mocks/server/factory_context.h"
 #include "test/mocks/upstream/cluster_info.h"
 #include "test/mocks/upstream/load_balancer.h"
 #include "test/test_common/simulated_time_system.h"
@@ -24,7 +25,7 @@
 
 namespace Envoy {
 namespace Extensions {
-namespace LoadBalancingPolices {
+namespace LoadBalancingPolicies {
 namespace Subset {
 namespace {
 
@@ -43,10 +44,12 @@ public:
     child_lb->mutable_typed_extension_config()->set_name("envoy.load_balancing_policies.random");
     envoy::extensions::load_balancing_policies::random::v3::Random random_lb_config;
     child_lb->mutable_typed_extension_config()->mutable_typed_config()->PackFrom(random_lb_config);
-    NiceMock<Upstream::MockLoadBalancerFactoryContext> lb_factory_context;
+    NiceMock<Server::Configuration::MockServerFactoryContext> factory_context;
 
+    absl::Status status = absl::OkStatus();
     subset_config_ = std::make_unique<Upstream::SubsetLoadBalancerConfig>(
-        lb_factory_context, subset_config_proto, ProtobufMessage::getStrictValidationVisitor());
+        factory_context, subset_config_proto, status);
+    ASSERT(status.ok());
 
     lb_ = std::make_unique<Upstream::SubsetLoadBalancer>(*subset_config_, *info_, priority_set_,
                                                          &local_priority_set_, stats_, stats_scope_,
@@ -65,10 +68,10 @@ public:
   void update() {
     priority_set_.updateHosts(
         0, Upstream::HostSetImpl::partitionHosts(smaller_hosts_, smaller_locality_hosts_), nullptr,
-        {}, host_moved_, random_.random(), absl::nullopt);
+        {}, host_moved_, absl::nullopt);
     priority_set_.updateHosts(
         0, Upstream::HostSetImpl::partitionHosts(orig_hosts_, orig_locality_hosts_), nullptr,
-        host_moved_, {}, random_.random(), absl::nullopt);
+        host_moved_, {}, absl::nullopt);
   }
 
   std::unique_ptr<Upstream::SubsetLoadBalancerConfig> subset_config_;
@@ -119,6 +122,6 @@ BENCHMARK(benchmarkSubsetLoadBalancerUpdate)
 
 } // namespace
 } // namespace Subset
-} // namespace LoadBalancingPolices
+} // namespace LoadBalancingPolicies
 } // namespace Extensions
 } // namespace Envoy

@@ -163,7 +163,7 @@ bool ProcessorState::handleDataGolangStatus(const GolangStatus status) {
 };
 
 // should set trailers_ to nullptr when return true.
-// means we should not read/write trailers then, since trailers will pass to next fitler.
+// means we should not read/write trailers then, since trailers will pass to next filter.
 bool ProcessorState::handleTrailerGolangStatus(const GolangStatus status) {
   ENVOY_LOG(debug, "golang filter handle trailer status, state: {}, status: {}", stateStr(),
             int(status));
@@ -300,7 +300,7 @@ void DecodingProcessorState::addBufferData(Buffer::Instance& data) {
           }
         },
         []() -> void { /* TODO: Handle overflow watermark */ });
-    data_buffer_->setWatermarks(decoder_callbacks_->decoderBufferLimit());
+    data_buffer_->setWatermarks(decoder_callbacks_->bufferLimit());
   }
   data_buffer_->move(data);
 }
@@ -334,7 +334,7 @@ void EncodingProcessorState::addBufferData(Buffer::Instance& data) {
           }
         },
         []() -> void { /* TODO: Handle overflow watermark */ });
-    data_buffer_->setWatermarks(encoder_callbacks_->encoderBufferLimit());
+    data_buffer_->setWatermarks(encoder_callbacks_->bufferLimit());
   }
   data_buffer_->move(data);
 }

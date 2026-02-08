@@ -1,3 +1,5 @@
+#include "test/integration/websocket_integration_test.h"
+
 #include <string>
 
 #include "envoy/config/bootstrap/v3/bootstrap.pb.h"
@@ -7,7 +9,6 @@
 #include "source/common/protobuf/utility.h"
 
 #include "test/integration/utility.h"
-#include "test/integration/websocket_integration_test.h"
 #include "test/test_common/network_utility.h"
 #include "test/test_common/printers.h"
 #include "test/test_common/utility.h"
@@ -34,9 +35,9 @@ ConfigHelper::HttpModifierFunction setRouteUsingWebsocket() {
 
 void WebsocketIntegrationTest::initialize() { HttpProtocolIntegrationTest::initialize(); }
 
-std::string genSoPath(std::string name) {
+std::string genSoPath() {
   return TestEnvironment::substitute(
-      "{{ test_rundir }}/contrib/golang/filters/http/test/test_data/" + name + "/filter.so");
+      "{{ test_rundir }}/contrib/golang/filters/http/test/test_data/plugins.so");
 }
 
 std::string filterConfig(const std::string& name) {
@@ -54,7 +55,7 @@ typed_config:
      match_path: "/echo"
 )EOF";
 
-  return absl::StrFormat(yaml_fmt, name, genSoPath(name), name);
+  return absl::StrFormat(yaml_fmt, name, genSoPath(), name);
 }
 
 TEST_P(GolangWebsocketIntegrationTest, WebsocketGolangFilterChain) {

@@ -39,8 +39,8 @@ bool TcpListenerImpl::rejectCxOverGlobalLimit() const {
     // Try to allocate resource within overload manager. We do it once here, instead of checking if
     // it is possible to allocate resource in this method and then actually allocating it later in
     // the code to avoid race conditions.
-    return !(overload_state_->tryAllocateResource(
-        Server::OverloadProactiveResourceName::GlobalDownstreamMaxConnections, 1));
+    return !overload_state_->tryAllocateResource(
+        Server::OverloadProactiveResourceName::GlobalDownstreamMaxConnections, 1);
   } else {
     // If the connection limit is not set, don't limit the connections, but still track them.
     // TODO(tonya11en): In integration tests, threadsafeSnapshot is necessary since the
@@ -53,7 +53,14 @@ bool TcpListenerImpl::rejectCxOverGlobalLimit() const {
   }
 }
 
-void TcpListenerImpl::onSocketEvent(short flags) {
+void TcpListenerImpl::releaseGlobalCxLimitResource() const {
+  if (track_global_cx_limit_in_overload_manager_) {
+    overload_state_->tryDeallocateResource(
+        Server::OverloadProactiveResourceName::GlobalDownstreamMaxConnections, 1);
+  }
+}
+
+absl::Status TcpListenerImpl::onSocketEvent(short flags) {
   ASSERT(bind_to_port_);
   ASSERT(flags & (Event::FileReadyType::Read));
 
@@ -80,6 +87,9 @@ void TcpListenerImpl::onSocketEvent(short flags) {
       continue;
     } else if ((listener_accept_ != nullptr && listener_accept_->shouldShedLoad()) ||
                random_.bernoulli(reject_fraction_)) {
+      // rejectCxOverGlobalLimit() returned false, meaning it allocated a connection resource.
+      // Since we're rejecting due to load shedding, we must release that resource.
+      releaseGlobalCxLimitResource();
       io_handle->close();
       cb_.onReject(TcpListenerCallbacks::RejectCause::OverloadAction);
       continue;
@@ -87,8 +97,15 @@ void TcpListenerImpl::onSocketEvent(short flags) {
 
     // Get the local address from the new socket if the listener is listening on IP ANY
     // (e.g., 0.0.0.0 for IPv4) (local_address_ is nullptr in this case).
-    const Address::InstanceConstSharedPtr& local_address =
-        local_address_ ? local_address_ : io_handle->localAddress();
+    Address::InstanceConstSharedPtr local_address = local_address_;
+    if (!local_address) {
+      auto address_or_error = io_handle->localAddress();
+      if (!address_or_error.status().ok()) {
+        releaseGlobalCxLimitResource();
+        return address_or_error.status();
+      }
+      local_address = std::move(address_or_error.value());
+    }
 
     // The accept() call that filled in remote_addr doesn't fill in more than the sa_family field
     // for Unix domain sockets; apparently there isn't a mechanism in the kernel to get the
@@ -98,12 +115,23 @@ void TcpListenerImpl::onSocketEvent(short flags) {
     // effect if the socket is a v4 socket, but for v6 sockets this will create an IPv4 remote
     // address if an IPv4 local_address was created from an IPv6 mapped IPv4 address.
 
-    const Address::InstanceConstSharedPtr remote_address =
-        (remote_addr.ss_family == AF_UNIX)
-            ? io_handle->peerAddress()
-            : Address::addressFromSockAddrOrThrow(remote_addr, remote_addr_len,
-                                                  local_address->ip()->version() ==
-                                                      Address::IpVersion::v6);
+    Address::InstanceConstSharedPtr remote_address;
+    if (remote_addr.ss_family == AF_UNIX) {
+      auto address_or_error = io_handle->peerAddress();
+      if (!address_or_error.status().ok()) {
+        releaseGlobalCxLimitResource();
+        return address_or_error.status();
+      }
+      remote_address = std::move(address_or_error.value());
+    } else {
+      auto address_or_error = Address::addressFromSockAddr(
+          remote_addr, remote_addr_len, local_address->ip()->version() == Address::IpVersion::v6);
+      if (!address_or_error.status().ok()) {
+        releaseGlobalCxLimitResource();
+        return address_or_error.status();
+      }
+      remote_address = std::move(address_or_error.value());
+    }
 
     cb_.onAccept(std::make_unique<AcceptedSocketImpl>(std::move(io_handle), local_address,
                                                       remote_address, overload_state_,
@@ -113,6 +141,7 @@ void TcpListenerImpl::onSocketEvent(short flags) {
   ENVOY_LOG_MISC(trace, "TcpListener accepted {} new connections.",
                  connections_accepted_from_kernel_count);
   cb_.recordConnectionsAcceptedOnSocketEvent(connections_accepted_from_kernel_count);
+  return absl::OkStatus();
 }
 
 TcpListenerImpl::TcpListenerImpl(Event::Dispatcher& dispatcher, Random::RandomGenerator& random,
@@ -137,11 +166,7 @@ TcpListenerImpl::TcpListenerImpl(Event::Dispatcher& dispatcher, Random::RandomGe
     // transient accept errors or early termination due to accepting
     // max_connections_to_accept_per_socket_event connections.
     socket_->ioHandle().initializeFileEvent(
-        dispatcher,
-        [this](uint32_t events) {
-          onSocketEvent(events);
-          return absl::OkStatus();
-        },
+        dispatcher, [this](uint32_t events) { return onSocketEvent(events); },
         Event::FileTriggerType::Level, Event::FileReadyType::Read);
   }
 }

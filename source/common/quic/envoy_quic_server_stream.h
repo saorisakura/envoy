@@ -27,8 +27,8 @@ public:
                             headers_with_underscores_action);
 
   void setRequestDecoder(Http::RequestDecoder& decoder) override {
-    request_decoder_ = &decoder;
-    stats_gatherer_->setAccessLogHandlers(request_decoder_->accessLogHandlers());
+    request_decoder_ = decoder.getRequestDecoderHandle();
+    stats_gatherer_->setAccessLogHandlers(request_decoder_->get()->accessLogHandlers());
   }
 
   // Http::StreamEncoder
@@ -62,9 +62,11 @@ public:
 
   // Http::Stream
   void resetStream(Http::StreamResetReason reason) override;
+  absl::optional<uint32_t> codecStreamId() const override { return id(); }
 
   // quic::QuicStream
   void OnStreamFrame(const quic::QuicStreamFrame& frame) override;
+  void OnSoonToBeDestroyed() override;
   // quic::QuicSpdyStream
   void OnBodyAvailable() override;
   bool OnStopSending(quic::QuicResetStreamError error) override;
@@ -121,7 +123,7 @@ private:
   void useCapsuleProtocol();
 #endif
 
-  Http::RequestDecoder* request_decoder_{nullptr};
+  Http::RequestDecoderHandlePtr request_decoder_;
   envoy::config::core::v3::HttpProtocolOptions::HeadersWithUnderscoresAction
       headers_with_underscores_action_;
 

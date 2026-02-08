@@ -68,7 +68,10 @@ jobs:
         - target: android-release
           args: >-
             build
-            --config=mobile-remote-release-clang-android-publish
+            --config=ci
+            --config=mobile-rbe
+            --config=mobile-release
+            --config=mobile-android-publish
             --define=pom_version=$VERSION
             //:android_dist
           output: envoy
@@ -86,12 +89,12 @@ jobs:
         include:
         - output: envoy
     steps:
-    - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
       with:
         fetch-depth: 0
     - name: Add safe directory
       run: git config --global --add safe.directory /__w/envoy/envoy
-    - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+    - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
       with:
         name: ${{ matrix.output }}_android_aar_sources
         path: .

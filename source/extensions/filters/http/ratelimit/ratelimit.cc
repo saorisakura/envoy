@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "envoy/extensions/common/ratelimit/v3/ratelimit.pb.h"
 #include "envoy/http/codes.h"
 #include "envoy/stream_info/stream_info.h"
 
@@ -55,37 +56,74 @@ void Filter::initiateCall(const Http::RequestHeaderMap& headers) {
     return;
   }
 
-  Router::RouteConstSharedPtr route = callbacks_->route();
-  if (!route || !route->routeEntry()) {
+  descriptors_.clear();
+  populateRateLimitDescriptors(descriptors_, headers, false);
+  ENVOY_LOG(debug, "rate limit descriptors size: {}", descriptors_.size());
+  if (!descriptors_.empty()) {
+    state_ = State::Calling;
+    initiating_call_ = true;
+    client_->limit(*this, getDomain(), descriptors_, callbacks_->activeSpan(),
+                   callbacks_->streamInfo(), getHitAddend());
+    initiating_call_ = false;
+  }
+}
+
+void Filter::populateRateLimitDescriptors(std::vector<Envoy::RateLimit::Descriptor>& descriptors,
+                                          const Http::RequestHeaderMap& headers,
+                                          bool on_stream_done) {
+  if (!on_stream_done) {
+    // To use the exact same context for both request and on_stream_done rate limiting descriptors,
+    // we save the route and per-route configuration here and use them later.
+    route_ = callbacks_->route();
+    cluster_ = callbacks_->clusterInfo();
+  }
+  if (!route_ || !cluster_) {
+    return;
+  }
+  const Router::RouteEntry* route_entry = route_->routeEntry();
+  if (!route_entry) {
+    return;
+  }
+  if (!on_stream_done) {
+    route_config_ =
+        Http::Utility::resolveMostSpecificPerFilterConfig<FilterConfigPerRoute>(callbacks_);
+    initializeVirtualHostRateLimitOption(route_entry);
+  }
+
+  // The the embedded rate limits is set in the typed_per_filter_config, use it and ignore the
+  // rate limits of route.
+  if (route_config_ != nullptr && route_config_->hasRateLimitConfigs()) {
+    route_config_->populateDescriptors(headers, callbacks_->streamInfo(), descriptors,
+                                       on_stream_done);
     return;
   }
 
-  cluster_ = callbacks_->clusterInfo();
-  if (!cluster_) {
+  // Rate Limit config in typed_per_filter_config takes precedence over route's rate limit.
+  if (config_->hasRateLimitConfigs()) {
+    config_->populateDescriptors(headers, callbacks_->streamInfo(), descriptors, on_stream_done);
     return;
   }
 
-  std::vector<Envoy::RateLimit::Descriptor> descriptors;
-
-  const Router::RouteEntry* route_entry = route->routeEntry();
   // Get all applicable rate limit policy entries for the route.
-  populateRateLimitDescriptors(route_entry->rateLimitPolicy(), descriptors, headers);
+  populateRateLimitDescriptorsForPolicy(route_entry->rateLimitPolicy(), descriptors, headers,
+                                        on_stream_done);
 
-  VhRateLimitOptions vh_rate_limit_option = getVirtualHostRateLimitOption(route);
-
-  switch (vh_rate_limit_option) {
+  switch (vh_rate_limits_) {
   case VhRateLimitOptions::Ignore:
     break;
   case VhRateLimitOptions::Include:
-    populateRateLimitDescriptors(route->virtualHost().rateLimitPolicy(), descriptors, headers);
+    populateRateLimitDescriptorsForPolicy(route_->virtualHost()->rateLimitPolicy(), descriptors,
+                                          headers, on_stream_done);
     break;
   case VhRateLimitOptions::Override:
     if (route_entry->rateLimitPolicy().empty()) {
-      populateRateLimitDescriptors(route->virtualHost().rateLimitPolicy(), descriptors, headers);
+      populateRateLimitDescriptorsForPolicy(route_->virtualHost()->rateLimitPolicy(), descriptors,
+                                            headers, on_stream_done);
     }
-    break;
   }
+}
 
+double Filter::getHitAddend() {
   const StreamInfo::UInt32Accessor* hits_addend_filter_state =
       callbacks_->streamInfo().filterState()->getDataReadOnly<StreamInfo::UInt32Accessor>(
           HitsAddendFilterStateKey);
@@ -93,22 +131,15 @@ void Filter::initiateCall(const Http::RequestHeaderMap& headers) {
   if (hits_addend_filter_state != nullptr) {
     hits_addend = hits_addend_filter_state->value();
   }
-
-  if (!descriptors.empty()) {
-    state_ = State::Calling;
-    initiating_call_ = true;
-    client_->limit(*this, getDomain(), descriptors, callbacks_->activeSpan(),
-                   callbacks_->streamInfo(), hits_addend);
-    initiating_call_ = false;
-  }
+  return hits_addend;
 }
 
 Http::FilterHeadersStatus Filter::decodeHeaders(Http::RequestHeaderMap& headers, bool) {
-  if (!config_->runtime().snapshot().featureEnabled("ratelimit.http_filter_enabled", 100)) {
+  request_headers_ = &headers;
+  if (!config_->enabled()) {
     return Http::FilterHeadersStatus::Continue;
   }
 
-  request_headers_ = &headers;
   initiateCall(headers);
   return (state_ == State::Calling || state_ == State::Responded)
              ? Http::FilterHeadersStatus::StopIteration
@@ -161,6 +192,25 @@ void Filter::onDestroy() {
   if (state_ == State::Calling) {
     state_ = State::Complete;
     client_->cancel();
+  } else if (client_ != nullptr && request_headers_ != nullptr) {
+    std::vector<Envoy::RateLimit::Descriptor> descriptors;
+    populateRateLimitDescriptors(descriptors, *request_headers_, true);
+    if (!descriptors.empty()) {
+      // If the limit() call fails directly then the callback and client will be destroyed
+      // when calling the limit() function. To make sure we can call the detach() function
+      // safely, we convert the client_ to a shared_ptr.
+
+      std::shared_ptr<Filters::Common::RateLimit::Client> shared_client = std::move(client_);
+      // Since this filter is being destroyed, we need to keep the client alive until the request
+      // is complete by leaking the client with OnStreamDoneCallBack.
+      std::shared_ptr<OnStreamDoneCallBack> callback =
+          std::make_shared<OnStreamDoneCallBack>(shared_client);
+      callback->keepAlive();
+      callback->client().limit(*callback, getDomain(), descriptors, Tracing::NullSpan::instance(),
+                               callbacks_->streamInfo(), getHitAddend());
+      // If the limit() call fails directly then the detach() will be no-op.
+      shared_client->detach();
+    }
   }
 }
 
@@ -185,8 +235,7 @@ void Filter::complete(Filters::Common::RateLimit::LimitStatus status,
     cluster_->statsScope().counterFromStatName(stat_names.ok_).inc();
     break;
   case Filters::Common::RateLimit::LimitStatus::Error:
-    ENVOY_LOG_TO_LOGGER(Logger::Registry::getLog(Logger::Id::filter), debug,
-                        "rate limit status, status={}", static_cast<int>(status));
+    ENVOY_LOG(debug, "rate limit status, status={}", static_cast<int>(status));
     cluster_->statsScope().counterFromStatName(stat_names.error_).inc();
     break;
   case Filters::Common::RateLimit::LimitStatus::OverLimit:
@@ -213,19 +262,15 @@ void Filter::complete(Filters::Common::RateLimit::LimitStatus status,
     break;
   }
 
-  if (config_->enableXRateLimitHeaders()) {
-    Http::ResponseHeaderMapPtr rate_limit_headers =
-        XRateLimitHeaderUtils::create(std::move(descriptor_statuses));
+  if (descriptor_statuses != nullptr && !descriptor_statuses->empty()) {
     if (response_headers_to_add_ == nullptr) {
       response_headers_to_add_ = Http::ResponseHeaderMapImpl::create();
     }
-    Http::HeaderMapImpl::copyFrom(*response_headers_to_add_, *rate_limit_headers);
-  } else {
-    descriptor_statuses = nullptr;
+    XRateLimitHeaderUtils::populateHeaders(descriptors_, config_->enableXRateLimitHeaders(),
+                                           *descriptor_statuses, *response_headers_to_add_);
   }
 
-  if (status == Filters::Common::RateLimit::LimitStatus::OverLimit &&
-      config_->runtime().snapshot().featureEnabled("ratelimit.http_filter_enforcing", 100)) {
+  if (status == Filters::Common::RateLimit::LimitStatus::OverLimit && config_->enforced()) {
     state_ = State::Responded;
     callbacks_->streamInfo().setResponseFlag(StreamInfo::CoreResponseFlag::RateLimited);
     callbacks_->sendLocalReply(
@@ -256,9 +301,10 @@ void Filter::complete(Filters::Common::RateLimit::LimitStatus status,
   }
 }
 
-void Filter::populateRateLimitDescriptors(const Router::RateLimitPolicy& rate_limit_policy,
-                                          std::vector<RateLimit::Descriptor>& descriptors,
-                                          const Http::RequestHeaderMap& headers) const {
+void Filter::populateRateLimitDescriptorsForPolicy(const Router::RateLimitPolicy& rate_limit_policy,
+                                                   std::vector<RateLimit::Descriptor>& descriptors,
+                                                   const Http::RequestHeaderMap& headers,
+                                                   bool on_stream_done) {
   for (const Router::RateLimitPolicyEntry& rate_limit :
        rate_limit_policy.getApplicableRateLimit(config_->stage())) {
     const std::string& disable_key = rate_limit.disableKey();
@@ -267,8 +313,11 @@ void Filter::populateRateLimitDescriptors(const Router::RateLimitPolicy& rate_li
             fmt::format("ratelimit.{}.http_filter_enabled", disable_key), 100)) {
       continue;
     }
-    rate_limit.populateDescriptors(descriptors, config_->localInfo().clusterName(), headers,
-                                   callbacks_->streamInfo());
+    const bool apply_on_stream_done = rate_limit.applyOnStreamDone();
+    if (on_stream_done == apply_on_stream_done) {
+      rate_limit.populateDescriptors(descriptors, config_->localInfo().clusterName(), headers,
+                                     callbacks_->streamInfo());
+    }
   }
 }
 
@@ -296,14 +345,12 @@ void Filter::appendRequestHeaders(Http::HeaderMapPtr& request_headers_to_add) {
   }
 }
 
-VhRateLimitOptions Filter::getVirtualHostRateLimitOption(const Router::RouteConstSharedPtr& route) {
-  if (route->routeEntry()->includeVirtualHostRateLimits()) {
+void Filter::initializeVirtualHostRateLimitOption(const Router::RouteEntry* route_entry) {
+  if (route_entry->includeVirtualHostRateLimits()) {
     vh_rate_limits_ = VhRateLimitOptions::Include;
   } else {
-    const auto* specific_per_route_config =
-        Http::Utility::resolveMostSpecificPerFilterConfig<FilterConfigPerRoute>(callbacks_);
-    if (specific_per_route_config != nullptr) {
-      switch (specific_per_route_config->virtualHostRateLimits()) {
+    if (route_config_ != nullptr) {
+      switch (route_config_->virtualHostRateLimits()) {
       case envoy::extensions::filters::http::ratelimit::v3::RateLimitPerRoute::INCLUDE:
         vh_rate_limits_ = VhRateLimitOptions::Include;
         break;
@@ -318,16 +365,35 @@ VhRateLimitOptions Filter::getVirtualHostRateLimitOption(const Router::RouteCons
       vh_rate_limits_ = VhRateLimitOptions::Override;
     }
   }
-  return vh_rate_limits_;
 }
 
 std::string Filter::getDomain() {
-  const auto* specific_per_route_config =
-      Http::Utility::resolveMostSpecificPerFilterConfig<FilterConfigPerRoute>(callbacks_);
-  if (specific_per_route_config != nullptr && !specific_per_route_config->domain().empty()) {
-    return specific_per_route_config->domain();
+  if (route_config_ != nullptr && !route_config_->domain().empty()) {
+    return route_config_->domain();
   }
   return config_->domain();
+}
+
+void OnStreamDoneCallBack::complete(Filters::Common::RateLimit::LimitStatus,
+                                    Filters::Common::RateLimit::DescriptorStatusListPtr&&,
+                                    Http::ResponseHeaderMapPtr&&, Http::RequestHeaderMapPtr&&,
+                                    const std::string&,
+                                    Filters::Common::RateLimit::DynamicMetadataPtr&&) {
+  self_.reset();
+}
+
+bool FilterConfig::enabled() const {
+  if (filter_enabled_.has_value()) {
+    return filter_enabled_->enabled();
+  }
+  return runtime_.snapshot().featureEnabled("ratelimit.http_filter_enabled", 100);
+}
+
+bool FilterConfig::enforced() const {
+  if (filter_enforced_.has_value()) {
+    return filter_enforced_->enabled();
+  }
+  return runtime_.snapshot().featureEnabled("ratelimit.http_filter_enforcing", 100);
 }
 
 } // namespace RateLimitFilter

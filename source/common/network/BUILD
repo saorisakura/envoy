@@ -80,7 +80,6 @@ envoy_cc_library(
     srcs = ["connection_impl_base.cc"],
     hdrs = ["connection_impl_base.h"],
     deps = [
-        ":common_connection_filter_states_lib",
         ":connection_socket_lib",
         ":filter_manager_lib",
         "//envoy/common:scope_tracker_interface",
@@ -102,7 +101,6 @@ envoy_cc_library(
     name = "connection_impl",
     srcs = ["connection_impl.cc"],
     hdrs = ["connection_impl.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":address_lib",
         ":connection_base_lib",
@@ -123,6 +121,7 @@ envoy_cc_library(
         "//source/common/network:socket_option_factory_lib",
         "//source/common/runtime:runtime_features_lib",
         "//source/common/stream_info:stream_info_lib",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
@@ -183,6 +182,7 @@ envoy_cc_library(
     srcs = ["filter_manager_impl.cc"],
     hdrs = ["filter_manager_impl.h"],
     deps = [
+        "//envoy/access_log:access_log_interface",
         "//envoy/network:connection_interface",
         "//envoy/network:filter_interface",
         "//source/common/common:assert_lib",
@@ -206,6 +206,18 @@ envoy_cc_library(
 )
 
 envoy_cc_library(
+    name = "ip_address_lib",
+    srcs = ["ip_address.cc"],
+    hdrs = ["ip_address.h"],
+    deps = [
+        ":utility_lib",
+        "//envoy/network:address_interface",
+        "//envoy/registry",
+        "//envoy/stream_info:filter_state_interface",
+    ],
+)
+
+envoy_cc_library(
     name = "io_socket_error_lib",
     srcs = ["io_socket_error_impl.cc"],
     hdrs = ["io_socket_error_impl.h"],
@@ -219,15 +231,13 @@ envoy_cc_library(
 envoy_cc_library(
     name = "lc_trie_lib",
     hdrs = ["lc_trie.h"],
-    external_deps = [
-        "abseil_node_hash_set",
-        "abseil_int128",
-    ],
     deps = [
         ":address_lib",
         ":cidr_range_lib",
         ":utility_lib",
         "//source/common/common:assert_lib",
+        "@abseil-cpp//absl/container:node_hash_set",
+        "@abseil-cpp//absl/numeric:int128",
     ],
 )
 
@@ -252,7 +262,7 @@ envoy_cc_library(
         "win32_socket_handle_impl.cc",
     ] + select({
         "//bazel:android": [],
-        "//bazel:linux": [
+        "//bazel:liburing_enabled": [
             "io_uring_socket_handle_impl.cc",
         ],
         "//conditions:default": [],
@@ -264,9 +274,13 @@ envoy_cc_library(
         "win32_socket_handle_impl.h",
     ] + select({
         "//bazel:android": [],
-        "//bazel:linux": [
+        "//bazel:liburing_enabled": [
             "io_uring_socket_handle_impl.h",
         ],
+        "//conditions:default": [],
+    }),
+    defines = select({
+        "//bazel:liburing_enabled": ["ENVOY_ENABLE_IO_URING=1"],
         "//conditions:default": [],
     }),
     deps = [
@@ -280,11 +294,11 @@ envoy_cc_library(
         "//source/common/api:os_sys_calls_lib",
         "//source/common/buffer:buffer_lib",
         "//source/common/event:dispatcher_includes",
-        "@com_github_google_quiche//:quic_core_lru_cache_lib",
-        "@com_github_google_quiche//:quic_platform_socket_address",
         "@envoy_api//envoy/extensions/network/socket_interface/v3:pkg_cc_proto",
+        "@quiche//:quic_platform_socket_address",
     ] + select({
-        "//bazel:linux": [
+        "//bazel:android": [],
+        "//bazel:liburing_enabled": [
             "//source/common/io:io_uring_impl_lib",
             "//source/common/io:io_uring_worker_factory_impl_lib",
             "//source/common/io:io_uring_worker_lib",
@@ -415,16 +429,18 @@ envoy_cc_library(
     name = "socket_option_lib",
     srcs = ["socket_option_impl.cc"],
     hdrs = ["socket_option_impl.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":address_lib",
         "//envoy/api:os_sys_calls_interface",
+        "//envoy/network:address_interface",
         "//envoy/network:listen_socket_interface",
         "//source/common/api:os_sys_calls_lib",
         "//source/common/common:assert_lib",
         "//source/common/common:minimal_logger_lib",
         "//source/common/common:scalar_to_byte_vector_lib",
         "//source/common/common:utility_lib",
+        "//source/common/memory:aligned_allocator_lib",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
@@ -433,7 +449,6 @@ envoy_cc_library(
     name = "addr_family_aware_socket_option_lib",
     srcs = ["addr_family_aware_socket_option_impl.cc"],
     hdrs = ["addr_family_aware_socket_option_impl.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":address_lib",
         ":socket_lib",
@@ -442,6 +457,7 @@ envoy_cc_library(
         "//source/common/api:os_sys_calls_lib",
         "//source/common/common:assert_lib",
         "//source/common/common:logger_lib",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
@@ -467,14 +483,15 @@ envoy_cc_library(
     name = "socket_option_factory_lib",
     srcs = ["socket_option_factory.cc"],
     hdrs = ["socket_option_factory.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":addr_family_aware_socket_option_lib",
         ":address_lib",
         ":socket_option_lib",
         ":win32_redirect_records_option_lib",
+        "//envoy/network:address_interface",
         "//envoy/network:listen_socket_interface",
         "//source/common/common:logger_lib",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
@@ -486,8 +503,10 @@ envoy_cc_library(
     deps = [
         ":address_lib",
         ":default_socket_interface_lib",
+        ":ip_address_parsing_lib",
         ":socket_lib",
         ":socket_option_lib",
+        "//envoy/api:os_sys_calls_interface",
         "//envoy/network:connection_interface",
         "//envoy/network:listener_interface",
         "//envoy/stats:stats_interface",
@@ -495,9 +514,20 @@ envoy_cc_library(
         "//source/common/buffer:buffer_lib",
         "//source/common/common:assert_lib",
         "//source/common/common:cleanup_lib",
+        "//source/common/common:fmt_lib",
         "//source/common/common:utility_lib",
         "//source/common/protobuf",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_library(
+    name = "ip_address_parsing_lib",
+    srcs = ["ip_address_parsing.cc"],
+    hdrs = ["ip_address_parsing.h"],
+    deps = [
+        "//source/common/api:os_sys_calls_lib",
+        "//source/common/common:statusor_lib",
     ],
 )
 
@@ -507,6 +537,7 @@ envoy_cc_library(
     hdrs = ["transport_socket_options_impl.h"],
     deps = [
         ":application_protocol_lib",
+        ":downstream_network_namespace_lib",
         ":filter_state_proxy_info_lib",
         ":proxy_protocol_filter_state_lib",
         ":upstream_server_name_lib",
@@ -558,6 +589,17 @@ envoy_cc_library(
 )
 
 envoy_cc_library(
+    name = "downstream_network_namespace_lib",
+    srcs = ["downstream_network_namespace.cc"],
+    hdrs = ["downstream_network_namespace.h"],
+    deps = [
+        "//envoy/registry",
+        "//envoy/stream_info:filter_state_interface",
+        "//source/common/common:macros",
+    ],
+)
+
+envoy_cc_library(
     name = "upstream_subject_alt_names_lib",
     srcs = ["upstream_subject_alt_names.cc"],
     hdrs = ["upstream_subject_alt_names.h"],
@@ -574,12 +616,10 @@ envoy_cc_library(
         "filter_matcher.cc",
     ],
     hdrs = ["filter_matcher.h"],
-    external_deps = [
-        "abseil_str_format",
-    ],
     deps = [
         "//envoy/network:filter_interface",
         "//envoy/network:listen_socket_interface",
+        "@abseil-cpp//absl/strings:str_format",
         "@envoy_api//envoy/config/listener/v3:pkg_cc_proto",
     ],
 )
@@ -626,16 +666,5 @@ envoy_cc_library(
     hdrs = ["generic_listener_filter_impl_base.h"],
     deps = [
         "//envoy/network:filter_interface",
-    ],
-)
-
-envoy_cc_library(
-    name = "common_connection_filter_states_lib",
-    srcs = ["common_connection_filter_states.cc"],
-    hdrs = ["common_connection_filter_states.h"],
-    deps = [
-        "//envoy/common:execution_context",
-        "//envoy/network:connection_interface",
-        "//envoy/stream_info:filter_state_interface",
     ],
 )

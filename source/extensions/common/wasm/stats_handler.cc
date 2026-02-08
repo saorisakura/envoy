@@ -10,7 +10,7 @@ namespace Common {
 namespace Wasm {
 
 Stats::ScopeSharedPtr CreateStatsHandler::lockAndCreateStats(const Stats::ScopeSharedPtr& scope) {
-  absl::MutexLock l(&mutex_);
+  absl::MutexLock l(mutex_);
   Stats::ScopeSharedPtr lock;
   if (!(lock = scope_.lock())) {
     resetStats();
@@ -23,7 +23,7 @@ Stats::ScopeSharedPtr CreateStatsHandler::lockAndCreateStats(const Stats::ScopeS
 }
 
 void CreateStatsHandler::resetStatsForTesting() {
-  absl::MutexLock l(&mutex_);
+  absl::MutexLock l(mutex_);
   resetStats();
 }
 
@@ -81,6 +81,25 @@ void LifecycleStatsHandler::onEvent(WasmEvent event) {
 }
 
 int64_t LifecycleStatsHandler::getActiveVmCount() { return active_wasms; };
+
+StatsHandler::StatsHandler(Stats::Scope& parent_scope, const std::string& prefix)
+    : scope_(parent_scope.createScope(prefix)), wasm_stats_{WASM_STATS(POOL_COUNTER(*scope_))} {}
+
+void StatsHandler::onEvent(WasmEvent event) const {
+  switch (event) {
+  case WasmEvent::VmReloadBackoff:
+    wasm_stats_.vm_reload_backoff_.inc();
+    break;
+  case WasmEvent::VmReloadSuccess:
+    wasm_stats_.vm_reload_success_.inc();
+    break;
+  case WasmEvent::VmReloadFailure:
+    wasm_stats_.vm_reload_failure_.inc();
+    break;
+  default:
+    break;
+  }
+}
 
 } // namespace Wasm
 } // namespace Common

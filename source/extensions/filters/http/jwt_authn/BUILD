@@ -17,7 +17,7 @@ envoy_cc_library(
         "//envoy/runtime:runtime_interface",
         "//source/common/http:header_utility_lib",
         "//source/common/http:utility_lib",
-        "@com_google_absl//absl/container:btree",
+        "@abseil-cpp//absl/container:btree",
         "@envoy_api//envoy/extensions/filters/http/jwt_authn/v3:pkg_cc_proto",
     ],
 )
@@ -34,14 +34,12 @@ envoy_cc_library(
     name = "jwks_async_fetcher_lib",
     srcs = ["jwks_async_fetcher.cc"],
     hdrs = ["jwks_async_fetcher.h"],
-    external_deps = [
-        "jwt_verify_lib",
-    ],
     deps = [
         ":stats_lib",
         "//envoy/server:factory_context_interface",
         "//source/common/common:minimal_logger_lib",
         "//source/common/init:target_lib",
+        "//source/common/jwt:jwt_lib",
         "//source/common/protobuf:utility_lib",
         "//source/common/tracing:http_tracer_lib",
         "//source/extensions/filters/http/common:jwks_fetcher_lib",
@@ -53,13 +51,12 @@ envoy_cc_library(
     name = "jwks_cache_lib",
     srcs = ["jwks_cache.cc"],
     hdrs = ["jwks_cache.h"],
-    external_deps = [
-        "jwt_verify_lib",
-    ],
     deps = [
         "jwks_async_fetcher_lib",
         ":jwt_cache_lib",
         "//source/common/config:datasource_lib",
+        "//source/common/jwt:jwt_lib",
+        "//source/common/router:retry_policy_lib",
         "@envoy_api//envoy/extensions/filters/http/jwt_authn/v3:pkg_cc_proto",
     ],
 )
@@ -83,14 +80,12 @@ envoy_cc_library(
     name = "filter_lib",
     srcs = ["filter.cc"],
     hdrs = ["filter.h"],
-    external_deps = [
-        "jwt_verify_lib",
-    ],
     deps = [
         ":filter_config_lib",
         ":matchers_lib",
         "//envoy/http:filter_interface",
         "//source/common/http:headers_lib",
+        "//source/common/jwt:jwt_lib",
     ],
 )
 
@@ -151,11 +146,9 @@ envoy_cc_library(
     name = "jwt_cache_lib",
     srcs = ["jwt_cache.cc"],
     hdrs = ["jwt_cache.h"],
-    external_deps = [
-        "jwt_verify_lib",
-        "simple_lru_cache_lib",
-    ],
     deps = [
+        "//source/common/jwt:jwt_lib",
+        "//source/common/jwt:simple_lru_cache_lib",
         "//source/common/protobuf:utility_lib",
         "@envoy_api//envoy/extensions/filters/http/jwt_authn/v3:pkg_cc_proto",
     ],

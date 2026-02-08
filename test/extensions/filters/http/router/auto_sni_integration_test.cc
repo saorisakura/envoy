@@ -70,12 +70,11 @@ public:
         TestEnvironment::runfilesPath("test/config/integration/certs/upstreamkey.pem"));
 
     auto cfg = *Extensions::TransportSockets::Tls::ServerContextConfigImpl::create(
-        tls_context, factory_context_, false);
+        tls_context, factory_context_, {}, false);
 
     static auto* upstream_stats_store = new Stats::IsolatedStoreImpl();
     return *Extensions::TransportSockets::Tls::ServerSslSocketFactory::create(
-        std::move(cfg), context_manager_, *upstream_stats_store->rootScope(),
-        std::vector<std::string>{});
+        std::move(cfg), context_manager_, *upstream_stats_store->rootScope());
   }
 };
 
@@ -130,39 +129,6 @@ virtual_hosts:
       dynamic_cast<const Extensions::TransportSockets::Tls::SslHandshakerImpl*>(
           fake_upstream_connection_->connection().ssl().get());
   EXPECT_STREQ("foo", SSL_get_servername(ssl_socket->ssl(), TLSEXT_NAMETYPE_host_name));
-}
-
-TEST_P(AutoSniIntegrationTest, AutoSniTestWithHostRewriteLegacy) {
-  const std::string yaml = R"EOF(
-virtual_hosts:
-- name: local_service
-  domains: ["*"]
-  routes:
-  - match:
-      prefix: "/"
-    name: "foo"
-    route:
-      cluster: cluster_0
-      host_rewrite_literal: foo
-  )EOF";
-  envoy::config::route::v3::RouteConfiguration route_config;
-  TestUtility::loadFromYaml(yaml, route_config);
-  config_helper_.addRuntimeOverride(
-      "envoy.reloadable_features.use_route_host_mutation_for_auto_sni_san", "false");
-  setup("", &route_config);
-  codec_client_ = makeHttpConnection(lookupPort("http"));
-  const auto response_ = sendRequestAndWaitForResponse(
-      Http::TestRequestHeaderMapImpl{
-          {":method", "GET"}, {":path", "/"}, {":scheme", "http"}, {":authority", "localhost"}},
-      0, default_response_headers_, 0);
-
-  EXPECT_TRUE(upstream_request_->complete());
-  EXPECT_TRUE(response_->complete());
-
-  const Extensions::TransportSockets::Tls::SslHandshakerImpl* ssl_socket =
-      dynamic_cast<const Extensions::TransportSockets::Tls::SslHandshakerImpl*>(
-          fake_upstream_connection_->connection().ssl().get());
-  EXPECT_STRNE("foo", SSL_get_servername(ssl_socket->ssl(), TLSEXT_NAMETYPE_host_name));
 }
 
 TEST_P(AutoSniIntegrationTest, AutoSniTestWithHostRewriteRegex) {

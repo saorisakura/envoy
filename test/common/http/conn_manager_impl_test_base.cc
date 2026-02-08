@@ -3,11 +3,13 @@
 #include "source/extensions/request_id/uuid/config.h"
 
 #include "test/common/http/xff_extension.h"
+#include "test/extensions/filters/network/common/fuzz/utils/fakes.h"
 
 using testing::AtLeast;
 using testing::InSequence;
 using testing::InvokeWithoutArgs;
 using testing::Return;
+using testing::ReturnRef;
 
 namespace Envoy {
 namespace Http {
@@ -23,9 +25,7 @@ public:
   const RequestIDExtensionSharedPtr& requestIDExtension() override {
     return parent_.requestIDExtension();
   }
-  const std::list<AccessLog::InstanceSharedPtr>& accessLogs() override {
-    return parent_.accessLogs();
-  }
+  const AccessLog::InstanceSharedPtrVector& accessLogs() override { return parent_.accessLogs(); }
   const absl::optional<std::chrono::milliseconds>& accessLogFlushInterval() override {
     return parent_.accessLogFlushInterval();
   }
@@ -60,6 +60,9 @@ public:
   uint32_t maxRequestHeadersCount() const override { return parent_.maxRequestHeadersCount(); }
   std::chrono::milliseconds streamIdleTimeout() const override {
     return parent_.streamIdleTimeout();
+  }
+  absl::optional<std::chrono::milliseconds> streamFlushTimeout() const override {
+    return parent_.streamFlushTimeout();
   }
   std::chrono::milliseconds requestTimeout() const override { return parent_.requestTimeout(); }
   std::chrono::milliseconds requestHeadersTimeout() const override {
@@ -100,6 +103,9 @@ public:
   const std::vector<ClientCertDetailsType>& setCurrentClientCertDetails() const override {
     return parent_.setCurrentClientCertDetails();
   }
+  const Matcher::MatchTreePtr<HttpMatchingData>& forwardClientCertMatcher() const override {
+    return parent_.forwardClientCertMatcher();
+  }
   const Network::Address::Instance& localAddress() override { return parent_.localAddress(); }
   const absl::optional<std::string>& userAgent() override { return parent_.userAgent(); }
   Tracing::TracerSharedPtr tracer() override { return parent_.tracer(); }
@@ -130,7 +136,7 @@ public:
     return parent_.earlyHeaderMutationExtensions();
   }
   bool shouldStripTrailingHostDot() const override { return parent_.shouldStripTrailingHostDot(); }
-  uint64_t maxRequestsPerConnection() const override { return parent_.maxRequestsPerConnection(); }
+  uint32_t maxRequestsPerConnection() const override { return parent_.maxRequestsPerConnection(); }
   const HttpConnectionManagerProto::ProxyStatusConfig* proxyStatusConfig() const override {
     return parent_.proxyStatusConfig();
   }
@@ -142,6 +148,12 @@ public:
   bool addProxyProtocolConnectionState() const override {
     return parent_.addProxyProtocolConnectionState();
   }
+  const absl::flat_hash_set<uint32_t>& httpsDestinationPorts() const override {
+    return parent_.httpsDestinationPorts();
+  }
+  const absl::flat_hash_set<uint32_t>& httpDestinationPorts() const override {
+    return parent_.httpDestinationPorts();
+  }
 
 private:
   ConnectionManagerConfig& parent_;
@@ -152,7 +164,7 @@ HttpConnectionManagerImplMixin::HttpConnectionManagerImplMixin()
       access_log_path_("dummy_path"),
       access_logs_{AccessLog::InstanceSharedPtr{new Extensions::AccessLoggers::File::FileAccessLog(
           Filesystem::FilePathAndType{Filesystem::DestinationType::File, access_log_path_}, {},
-          Formatter::HttpSubstitutionFormatUtils::defaultSubstitutionFormatter(), log_manager_)}},
+          *Formatter::HttpSubstitutionFormatUtils::defaultSubstitutionFormatter(), log_manager_)}},
       codec_(new NiceMock<MockServerConnection>()),
       stats_({ALL_HTTP_CONN_MAN_STATS(POOL_COUNTER(*fake_stats_.rootScope()),
                                       POOL_GAUGE(*fake_stats_.rootScope()),
@@ -172,7 +184,7 @@ HttpConnectionManagerImplMixin::HttpConnectionManagerImplMixin()
   // method only.
   EXPECT_CALL(response_encoder_, getStream()).Times(AtLeast(0));
 
-  ip_detection_extensions_.push_back(getXFFExtension(0));
+  ip_detection_extensions_.push_back(getXFFExtension(0, false));
 }
 
 HttpConnectionManagerImplMixin::~HttpConnectionManagerImplMixin() {
@@ -200,6 +212,9 @@ void HttpConnectionManagerImplMixin::setup(const SetupOpts& opts) {
       .WillByDefault([&](auto, auto callback) {
         return filter_callbacks_.connection_.dispatcher_.createTimer(callback).release();
       });
+
+  const Network::ListenerInfo& listener_info = Server::Configuration::FakeListenerInfo();
+  ON_CALL(factory_context_, listenerInfo()).WillByDefault(ReturnRef(listener_info));
   filter_callbacks_.connection_.stream_info_.downstream_connection_info_provider_->setLocalAddress(
       std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1", 443));
   filter_callbacks_.connection_.stream_info_.downstream_connection_info_provider_->setRemoteAddress(
@@ -213,7 +228,7 @@ void HttpConnectionManagerImplMixin::setup(const SetupOpts& opts) {
   conn_manager_ = std::make_unique<ConnectionManagerImpl>(
       std::make_shared<ConnectionManagerConfigProxyObject>(*this), drain_close_, random_,
       http_context_, runtime_, local_info_, cluster_manager_, overload_manager_,
-      test_time_.timeSystem());
+      test_time_.timeSystem(), factory_context_.listenerInfo().direction());
 
   conn_manager_->initializeReadFilterCallbacks(filter_callbacks_);
 
@@ -229,8 +244,10 @@ void HttpConnectionManagerImplMixin::setup(const SetupOpts& opts) {
                                        percent1,
                                        percent2,
                                        percent1,
-                                       false,
-                                       256});
+                                       nullptr,
+                                       nullptr,
+                                       256,
+                                       false});
   }
 }
 
@@ -250,18 +267,20 @@ void HttpConnectionManagerImplMixin::setupFilterChain(int num_decoder_filters,
   for (int req = 0; req < num_requests; req++) {
     EXPECT_CALL(filter_factory_, createFilterChain(_))
         .WillOnce(Invoke([num_decoder_filters, num_encoder_filters, req,
-                          this](FilterChainManager& manager) -> bool {
+                          this](FilterChainFactoryCallbacks& callbacks) -> bool {
           bool applied_filters = false;
           if (log_handler_) {
             auto factory = createLogHandlerFactoryCb(log_handler_);
-            manager.applyFilterFactoryCb({}, factory);
+            callbacks.setFilterConfigName("");
+            factory(callbacks);
             applied_filters = true;
           }
           for (int i = 0; i < num_decoder_filters; i++) {
             auto factory = createDecoderFilterFactoryCb(
                 StreamDecoderFilterSharedPtr{decoder_filters_[req * num_decoder_filters + i]});
             std::string name = absl::StrCat(req * num_decoder_filters + i);
-            manager.applyFilterFactoryCb({name}, factory);
+            callbacks.setFilterConfigName(name);
+            factory(callbacks);
             applied_filters = true;
           }
 
@@ -269,7 +288,8 @@ void HttpConnectionManagerImplMixin::setupFilterChain(int num_decoder_filters,
             auto factory = createEncoderFilterFactoryCb(
                 StreamEncoderFilterSharedPtr{encoder_filters_[req * num_encoder_filters + i]});
             std::string name = absl::StrCat(req * num_decoder_filters + i);
-            manager.applyFilterFactoryCb({name}, factory);
+            callbacks.setFilterConfigName(name);
+            factory(callbacks);
             applied_filters = true;
           }
           return applied_filters;
@@ -394,21 +414,15 @@ void HttpConnectionManagerImplMixin::expectOnDestroy(bool deferred) {
   for (auto filter : decoder_filters_) {
     EXPECT_CALL(*filter, onStreamComplete());
   }
-  {
-    auto setup_filter_expect = [](MockStreamEncoderFilter* filter) {
-      EXPECT_CALL(*filter, onStreamComplete());
-    };
-    std::for_each(encoder_filters_.rbegin(), encoder_filters_.rend(), setup_filter_expect);
+  for (auto filter : encoder_filters_) {
+    EXPECT_CALL(*filter, onStreamComplete());
   }
 
   for (auto filter : decoder_filters_) {
     EXPECT_CALL(*filter, onDestroy());
   }
-  {
-    auto setup_filter_expect = [](MockStreamEncoderFilter* filter) {
-      EXPECT_CALL(*filter, onDestroy());
-    };
-    std::for_each(encoder_filters_.rbegin(), encoder_filters_.rend(), setup_filter_expect);
+  for (auto filter : encoder_filters_) {
+    EXPECT_CALL(*filter, onDestroy());
   }
 
   if (deferred) {

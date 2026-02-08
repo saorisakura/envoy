@@ -32,19 +32,6 @@ const SocketInterface* sockInterfaceOrDefault(const SocketInterface* sock_interf
   return sock_interface == nullptr ? &SocketInterfaceSingleton::get() : sock_interface;
 }
 
-void throwOnError(absl::Status status) {
-  if (!status.ok()) {
-    throwEnvoyExceptionOrPanic(status.ToString());
-  }
-}
-
-InstanceConstSharedPtr throwOnError(StatusOr<InstanceConstSharedPtr> address) {
-  if (!address.ok()) {
-    throwOnError(address.status());
-  }
-  return *address;
-}
-
 } // namespace
 
 bool forceV6() {
@@ -105,16 +92,6 @@ StatusOr<Address::InstanceConstSharedPtr> addressFromSockAddr(const sockaddr_sto
   }
 }
 
-Address::InstanceConstSharedPtr addressFromSockAddrOrThrow(const sockaddr_storage& ss,
-                                                           socklen_t ss_len, bool v6only) {
-  // Though we don't have any test coverage where address validation in addressFromSockAddr() fails,
-  // this code is called in worker thread and can throw in theory. In that case, the program will
-  // crash due to uncaught exception. In practice, we don't expect any address validation in
-  // addressFromSockAddr() to fail in worker thread.
-  StatusOr<InstanceConstSharedPtr> address = addressFromSockAddr(ss, ss_len, v6only);
-  return throwOnError(address);
-}
-
 Address::InstanceConstSharedPtr
 addressFromSockAddrOrDie(const sockaddr_storage& ss, socklen_t ss_len, os_fd_t fd, bool v6only) {
   // Set v6only to false so that mapped-v6 address can be normalize to v4
@@ -133,19 +110,24 @@ addressFromSockAddrOrDie(const sockaddr_storage& ss, socklen_t ss_len, os_fd_t f
   return *address;
 }
 
-Ipv4Instance::Ipv4Instance(const sockaddr_in* address, const SocketInterface* sock_interface)
-    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)) {
-  throwOnError(validateProtocolSupported());
+Ipv4Instance::Ipv4Instance(const sockaddr_in* address, const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)),
+      network_namespace_(network_namespace) {
+  THROW_IF_NOT_OK(validateProtocolSupported());
   initHelper(address);
 }
 
-Ipv4Instance::Ipv4Instance(const std::string& address, const SocketInterface* sock_interface)
-    : Ipv4Instance(address, 0, sockInterfaceOrDefault(sock_interface)) {}
+Ipv4Instance::Ipv4Instance(const std::string& address, const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : Ipv4Instance(address, 0, sockInterfaceOrDefault(sock_interface), network_namespace) {}
 
 Ipv4Instance::Ipv4Instance(const std::string& address, uint32_t port,
-                           const SocketInterface* sock_interface)
-    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)) {
-  throwOnError(validateProtocolSupported());
+                           const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)),
+      network_namespace_(network_namespace) {
+  THROW_IF_NOT_OK(validateProtocolSupported());
   memset(&ip_.ipv4_.address_, 0, sizeof(ip_.ipv4_.address_));
   ip_.ipv4_.address_.sin_family = AF_INET;
   ip_.ipv4_.address_.sin_port = htons(port);
@@ -158,9 +140,11 @@ Ipv4Instance::Ipv4Instance(const std::string& address, uint32_t port,
   ip_.friendly_address_ = address;
 }
 
-Ipv4Instance::Ipv4Instance(uint32_t port, const SocketInterface* sock_interface)
-    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)) {
-  throwOnError(validateProtocolSupported());
+Ipv4Instance::Ipv4Instance(uint32_t port, const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)),
+      network_namespace_(network_namespace) {
+  THROW_IF_NOT_OK(validateProtocolSupported());
   memset(&ip_.ipv4_.address_, 0, sizeof(ip_.ipv4_.address_));
   ip_.ipv4_.address_.sin_family = AF_INET;
   ip_.ipv4_.address_.sin_port = htons(port);
@@ -170,8 +154,10 @@ Ipv4Instance::Ipv4Instance(uint32_t port, const SocketInterface* sock_interface)
 }
 
 Ipv4Instance::Ipv4Instance(absl::Status& status, const sockaddr_in* address,
-                           const SocketInterface* sock_interface)
-    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)) {
+                           const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)),
+      network_namespace_(network_namespace) {
   status = validateProtocolSupported();
   if (!status.ok()) {
     return;
@@ -179,10 +165,17 @@ Ipv4Instance::Ipv4Instance(absl::Status& status, const sockaddr_in* address,
   initHelper(address);
 }
 
+Ipv4Instance::Ipv4Instance(const Ipv4Instance& that,
+                           const absl::optional<std::string>& network_namespace)
+    : InstanceBase(Type::Ip, &that.socket_interface_), ip_(that.ip_),
+      network_namespace_(network_namespace) {
+  friendly_name_ = that.friendly_name_;
+}
+
 bool Ipv4Instance::operator==(const Instance& rhs) const {
   const Ipv4Instance* rhs_casted = dynamic_cast<const Ipv4Instance*>(&rhs);
   return (rhs_casted && (ip_.ipv4_.address() == rhs_casted->ip_.ipv4_.address()) &&
-          (ip_.port() == rhs_casted->ip_.port()));
+          (ip_.port() == rhs_casted->ip_.port()) && (networkNamespace() == rhs.networkNamespace()));
 }
 
 std::string Ipv4Instance::sockaddrToString(const sockaddr_in& addr) {
@@ -257,14 +250,18 @@ uint32_t Ipv6Instance::Ipv6Helper::port() const { return ntohs(address_.sin6_por
 bool Ipv6Instance::Ipv6Helper::v6only() const { return v6only_; };
 
 std::string Ipv6Instance::Ipv6Helper::makeFriendlyAddress() const {
+  return makeFriendlyAddress(address_);
+}
+
+std::string Ipv6Instance::Ipv6Helper::makeFriendlyAddress(const sockaddr_in6& address) {
   char str[INET6_ADDRSTRLEN];
-  const char* ptr = inet_ntop(AF_INET6, &address_.sin6_addr, str, INET6_ADDRSTRLEN);
+  const char* ptr = inet_ntop(AF_INET6, &address.sin6_addr, str, INET6_ADDRSTRLEN);
   ASSERT(str == ptr);
-  if (address_.sin6_scope_id != 0) {
+  if (address.sin6_scope_id != 0) {
     // Note that here we don't use the `if_indextoname` that will give a more user friendly
     // output just because in the past created a performance bottleneck if the machine had a
     // lot of IPv6 Link local addresses.
-    return absl::StrCat(ptr, "%", scopeId());
+    return absl::StrCat(ptr, "%", address.sin6_scope_id);
   }
   return ptr;
 }
@@ -287,19 +284,25 @@ InstanceConstSharedPtr Ipv6Instance::Ipv6Helper::addressWithoutScopeId() const {
 }
 
 Ipv6Instance::Ipv6Instance(const sockaddr_in6& address, bool v6only,
-                           const SocketInterface* sock_interface)
-    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)) {
-  throwOnError(validateProtocolSupported());
+                           const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)),
+      network_namespace_(network_namespace) {
+  THROW_IF_NOT_OK(validateProtocolSupported());
   initHelper(address, v6only);
 }
 
-Ipv6Instance::Ipv6Instance(const std::string& address, const SocketInterface* sock_interface)
-    : Ipv6Instance(address, 0, sockInterfaceOrDefault(sock_interface)) {}
+Ipv6Instance::Ipv6Instance(const std::string& address, const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : Ipv6Instance(address, 0, sockInterfaceOrDefault(sock_interface), true /* v6only */,
+                   network_namespace) {}
 
 Ipv6Instance::Ipv6Instance(const std::string& address, uint32_t port,
-                           const SocketInterface* sock_interface, bool v6only)
-    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)) {
-  throwOnError(validateProtocolSupported());
+                           const SocketInterface* sock_interface, bool v6only,
+                           absl::optional<std::string> network_namespace)
+    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)),
+      network_namespace_(network_namespace) {
+  THROW_IF_NOT_OK(validateProtocolSupported());
   sockaddr_in6 addr_in;
   memset(&addr_in, 0, sizeof(addr_in));
   addr_in.sin6_family = AF_INET6;
@@ -314,24 +317,40 @@ Ipv6Instance::Ipv6Instance(const std::string& address, uint32_t port,
   initHelper(addr_in, v6only);
 }
 
-Ipv6Instance::Ipv6Instance(uint32_t port, const SocketInterface* sock_interface)
-    : Ipv6Instance("", port, sockInterfaceOrDefault(sock_interface)) {}
+Ipv6Instance::Ipv6Instance(uint32_t port, const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : Ipv6Instance("", port, sockInterfaceOrDefault(sock_interface), true /* v6only */,
+                   network_namespace) {}
 
 bool Ipv6Instance::operator==(const Instance& rhs) const {
   const auto* rhs_casted = dynamic_cast<const Ipv6Instance*>(&rhs);
   return (rhs_casted && (ip_.ipv6_.address() == rhs_casted->ip_.ipv6_.address()) &&
           (ip_.port() == rhs_casted->ip_.port()) &&
-          (ip_.ipv6_.scopeId() == rhs_casted->ip_.ipv6_.scopeId()));
+          (ip_.ipv6_.scopeId() == rhs_casted->ip_.ipv6_.scopeId()) &&
+          (networkNamespace() == rhs.networkNamespace()));
 }
 
 Ipv6Instance::Ipv6Instance(absl::Status& status, const sockaddr_in6& address, bool v6only,
-                           const SocketInterface* sock_interface)
-    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)) {
+                           const SocketInterface* sock_interface,
+                           absl::optional<std::string> network_namespace)
+    : InstanceBase(Type::Ip, sockInterfaceOrDefault(sock_interface)),
+      network_namespace_(network_namespace) {
   status = validateProtocolSupported();
   if (!status.ok()) {
     return;
   }
   initHelper(address, v6only);
+}
+
+Ipv6Instance::Ipv6Instance(const Ipv6Instance& that,
+                           const absl::optional<std::string>& network_namespace)
+    : InstanceBase(Type::Ip, &that.socket_interface_), ip_(that.ip_),
+      network_namespace_(network_namespace) {
+  friendly_name_ = that.friendly_name_;
+}
+
+std::string Ipv6Instance::sockaddrToString(const sockaddr_in6& addr) {
+  return Ipv6Helper::makeFriendlyAddress(addr);
 }
 
 namespace {

@@ -24,8 +24,9 @@ using AsyncStreamImplPtr = std::unique_ptr<AsyncStreamImpl>;
 
 class AsyncClientImpl final : public RawAsyncClient {
 public:
-  AsyncClientImpl(Upstream::ClusterManager& cm, const envoy::config::core::v3::GrpcService& config,
-                  TimeSource& time_source);
+  static absl::StatusOr<std::unique_ptr<AsyncClientImpl>>
+  create(const envoy::config::core::v3::GrpcService& config,
+         Server::Configuration::CommonFactoryContext& context);
   ~AsyncClientImpl() override;
 
   // Grpc::AsyncClient
@@ -38,9 +39,12 @@ public:
                            const Http::AsyncClient::StreamOptions& options) override;
   absl::string_view destination() override { return remote_cluster_name_; }
 
-  const absl::optional<envoy::config::route::v3::RetryPolicy>& retryPolicy() {
-    return retry_policy_;
-  }
+  const Router::RetryPolicyConstSharedPtr& retryPolicy() { return retry_policy_; }
+
+protected:
+  AsyncClientImpl(const envoy::config::core::v3::GrpcService& config,
+                  Server::Configuration::CommonFactoryContext& context,
+                  absl::Status& creation_status);
 
 private:
   const uint32_t max_recv_message_length_;
@@ -53,7 +57,7 @@ private:
   TimeSource& time_source_;
   Router::HeaderParserPtr metadata_parser_;
   // Default per service retry policy.
-  absl::optional<envoy::config::route::v3::RetryPolicy> retry_policy_;
+  Router::RetryPolicyConstSharedPtr retry_policy_;
 
   friend class AsyncRequestImpl;
   friend class AsyncStreamImpl;
@@ -67,6 +71,7 @@ public:
   AsyncStreamImpl(AsyncClientImpl& parent, absl::string_view service_full_name,
                   absl::string_view method_name, RawAsyncStreamCallbacks& callbacks,
                   const Http::AsyncClient::StreamOptions& options);
+  ~AsyncStreamImpl() override;
 
   virtual void initialize(bool buffer_body_for_retry);
 
@@ -76,6 +81,7 @@ public:
   void onTrailers(Http::ResponseTrailerMapPtr&& trailers) override;
   void onComplete() override;
   void onReset() override;
+  void waitForRemoteCloseAndDelete() override;
 
   // Grpc::AsyncStream
   void sendMessageRaw(Buffer::InstancePtr&& request, bool end_stream) override;
@@ -93,7 +99,12 @@ public:
     stream_->setWatermarkCallbacks(callbacks);
   }
 
-  void removeWatermarkCallbacks() override { stream_->removeWatermarkCallbacks(); }
+  void removeWatermarkCallbacks() override {
+    if (options_.sidestream_watermark_callbacks != nullptr) {
+      stream_->removeWatermarkCallbacks();
+      options_.sidestream_watermark_callbacks = nullptr;
+    }
+  }
 
 protected:
   Upstream::ClusterInfoConstSharedPtr cluster_info_;
@@ -109,6 +120,7 @@ private:
   // Deliver notification and update span when the connection closes.
   void notifyRemoteClose(Grpc::Status::GrpcStatus status, const std::string& message);
 
+protected:
   Event::Dispatcher* dispatcher_{};
   Http::RequestMessagePtr headers_message_;
   AsyncClientImpl& parent_;
@@ -119,10 +131,12 @@ private:
   RawAsyncStreamCallbacks& callbacks_;
   Http::AsyncClient::StreamOptions options_;
   bool http_reset_{};
+  bool waiting_to_delete_on_remote_close_{};
   Http::AsyncClient::Stream* stream_{};
   Decoder decoder_;
   // This is a member to avoid reallocation on every onData().
   std::vector<Frame> decoded_frames_;
+  Event::TimerPtr remote_close_timer_;
 
   friend class AsyncClientImpl;
 };
@@ -138,8 +152,11 @@ public:
 
   // Grpc::AsyncRequest
   void cancel() override;
+  const StreamInfo::StreamInfo& streamInfo() const override;
+  void detach() override;
 
 private:
+  using AsyncStreamImpl::streamInfo;
   // Grpc::AsyncStreamCallbacks
   void onCreateInitialMetadata(Http::RequestHeaderMap& metadata) override;
   void onReceiveInitialMetadata(Http::ResponseHeaderMapPtr&&) override;

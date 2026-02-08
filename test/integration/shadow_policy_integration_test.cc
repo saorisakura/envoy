@@ -22,8 +22,6 @@ public:
   ShadowPolicyIntegrationTest()
       : HttpIntegrationTest(Http::CodecType::HTTP2, std::get<0>(GetParam())),
         SocketInterfaceSwap(Network::Socket::Type::Stream) {
-    scoped_runtime_.mergeValues(
-        {{"envoy.reloadable_features.streaming_shadow", streaming_shadow_ ? "true" : "false"}});
     setUpstreamProtocol(Http::CodecType::HTTP2);
     autonomous_upstream_ = true;
     setUpstreamCount(2);
@@ -515,11 +513,9 @@ TEST_P(ShadowPolicyIntegrationTest, MainRequestOverBufferLimit) {
     GTEST_SKIP() << "Not applicable for non-streaming shadows.";
   }
   autonomous_upstream_ = true;
-  if (Runtime::runtimeFeatureEnabled(Runtime::defer_processing_backedup_streams)) {
-    // With deferred processing, a local reply is triggered so the upstream
-    // stream will be incomplete.
-    autonomous_allow_incomplete_streams_ = true;
-  }
+  // A local reply is triggered so the upstream stream will be incomplete.
+  autonomous_allow_incomplete_streams_ = true;
+
   cluster_with_custom_filter_ = 0;
   filter_name_ = "encoder-decoder-buffer-filter";
   initialConfigSetup("cluster_1", "");
@@ -547,13 +543,8 @@ TEST_P(ShadowPolicyIntegrationTest, MainRequestOverBufferLimit) {
 
   EXPECT_EQ(test_server_->counter("cluster.cluster_0.upstream_cx_total")->value(), 1);
   EXPECT_EQ(test_server_->counter("cluster.cluster_1.upstream_cx_total")->value(), 1);
-  if (Runtime::runtimeFeatureEnabled(Runtime::defer_processing_backedup_streams)) {
-    // With deferred processing, the encoder-decoder-buffer-filter will
-    // buffer too much data triggering a local reply.
-    test_server_->waitForCounterEq("http.config_test.downstream_rq_4xx", 1);
-  } else {
-    test_server_->waitForCounterEq("cluster.cluster_1.upstream_rq_completed", 1);
-  }
+  // The encoder-decoder-buffer-filter will buffer too much data triggering a local reply.
+  test_server_->waitForCounterEq("http.config_test.downstream_rq_4xx", 1);
 }
 
 TEST_P(ShadowPolicyIntegrationTest, ShadowRequestOverBufferLimit) {
@@ -605,7 +596,7 @@ TEST_P(ShadowPolicyIntegrationTest, ShadowRequestOverRouteBufferLimit) {
   config_helper_.addConfigModifier([](ConfigHelper::HttpConnectionManager& hcm) {
     hcm.mutable_route_config()
         ->mutable_virtual_hosts(0)
-        ->mutable_per_request_buffer_limit_bytes()
+        ->mutable_request_body_buffer_limit()
         ->set_value(0);
   });
   config_helper_.disableDelayClose();
@@ -663,7 +654,6 @@ TEST_P(ShadowPolicyIntegrationTest, BackedUpConnectionBeforeShadowBegins) {
             ->mutable_match()
             ->set_prefix("/main");
       });
-  config_helper_.addRuntimeOverride(Runtime::defer_processing_backedup_streams, "true");
   initialize();
 
   write_matcher_->setDestinationPort(fake_upstreams_[1]->localAddress()->ip()->port());
@@ -999,6 +989,135 @@ TEST_P(ShadowPolicyIntegrationTest, ShadowedClusterHostHeaderDisabledAppendSuffi
   // Ensure shadowed host header does not have suffix "-shadow".
   EXPECT_EQ(upstream_headers_->Host()->value().getStringView(), "sni.lyft.com");
   EXPECT_EQ(mirror_headers_->Host()->value().getStringView(), "sni.lyft.com");
+}
+
+TEST_P(ShadowPolicyIntegrationTest, ShadowedRequestMetadataLoadbalancing) {
+  initialConfigSetup("cluster_1", "");
+  config_helper_.addConfigModifier(
+      [](envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager&
+             hcm) -> void {
+        auto* metadata_match = hcm.mutable_route_config()
+                                   ->mutable_virtual_hosts(0)
+                                   ->mutable_routes(0)
+                                   ->mutable_route()
+                                   ->mutable_metadata_match();
+        TestUtility::loadFromYaml(R"EOF(
+            filterMetadata:
+              envoy.lb:
+                stack: "default"
+        )EOF",
+                                  *metadata_match);
+      });
+  config_helper_.addConfigModifier([](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+    auto clusters = bootstrap.mutable_static_resources()->mutable_clusters();
+    for (auto& cluster : *clusters) {
+      TestUtility::loadFromYaml(R"EOF(
+            subsetSelectors:
+              - keys:
+                - "stack"
+          )EOF",
+                                *cluster.mutable_lb_subset_config());
+
+      auto lb_endpoint =
+          cluster.mutable_load_assignment()->mutable_endpoints(0)->mutable_lb_endpoints(0);
+
+      TestUtility::loadFromYaml(R"EOF(
+                filterMetadata:
+                  envoy.lb:
+                    stack: "default"
+                )EOF",
+                                *lb_endpoint->mutable_metadata());
+    }
+  });
+  initialize();
+  sendRequestAndValidateResponse();
+}
+
+TEST_P(ShadowPolicyIntegrationTest, ShadowWithHeaderManipulation) {
+  initialConfigSetup("cluster_1", "");
+
+  // Configure the mirror policy with header manipulation
+  config_helper_.addConfigModifier(
+      [=](envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager&
+              hcm) -> void {
+        auto* mirror_policy = hcm.mutable_route_config()
+                                  ->mutable_virtual_hosts(0)
+                                  ->mutable_routes(0)
+                                  ->mutable_route()
+                                  ->mutable_request_mirror_policies(0);
+
+        // Add headers to the shadow request using HeaderMutation
+        auto* mutation1 = mirror_policy->add_request_headers_mutations();
+        auto* append1 = mutation1->mutable_append();
+        append1->mutable_header()->set_key("x-mirror-test");
+        append1->mutable_header()->set_value("mirror-value");
+        append1->set_append_action(
+            envoy::config::core::v3::HeaderValueOption::OVERWRITE_IF_EXISTS_OR_ADD);
+
+        auto* mutation2 = mirror_policy->add_request_headers_mutations();
+        auto* append2 = mutation2->mutable_append();
+        append2->mutable_header()->set_key("x-mirror-static");
+        append2->mutable_header()->set_value("static-value");
+
+        // Remove sensitive headers from the shadow request using HeaderMutation
+        auto* mutation3 = mirror_policy->add_request_headers_mutations();
+        mutation3->set_remove("x-sensitive-header");
+
+        auto* mutation4 = mirror_policy->add_request_headers_mutations();
+        mutation4->set_remove("authorization");
+
+        mirror_policy->set_host_rewrite_literal("shadow-target.example.com");
+      });
+
+  initialize();
+
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+
+  // Create request headers including some that should be removed in the shadow
+  Http::TestRequestHeaderMapImpl request_headers = default_request_headers_;
+  request_headers.addCopy("x-sensitive-header", "secret-data");
+  request_headers.addCopy("authorization", "Bearer token123");
+  request_headers.addCopy("x-custom-header", "should-remain");
+  request_headers.addCopy("x-mirror-test", "should-be-overwritten");
+
+  IntegrationStreamDecoderPtr response = codec_client_->makeHeaderOnlyRequest(request_headers);
+  ASSERT_TRUE(response->waitForEndStream());
+  EXPECT_TRUE(response->complete());
+  EXPECT_EQ("200", response->headers().getStatusValue());
+
+  upstream_headers_ =
+      reinterpret_cast<AutonomousUpstream*>(fake_upstreams_[0].get())->lastRequestHeaders();
+  EXPECT_TRUE(upstream_headers_ != nullptr);
+  mirror_headers_ =
+      reinterpret_cast<AutonomousUpstream*>(fake_upstreams_[1].get())->lastRequestHeaders();
+  EXPECT_TRUE(mirror_headers_ != nullptr);
+
+  // Validate that main request headers are unchanged
+  EXPECT_EQ(upstream_headers_->get(Http::LowerCaseString("x-sensitive-header"))[0]->value(),
+            "secret-data");
+  EXPECT_EQ(upstream_headers_->get(Http::LowerCaseString("authorization"))[0]->value(),
+            "Bearer token123");
+  EXPECT_EQ(upstream_headers_->get(Http::LowerCaseString("x-custom-header"))[0]->value(),
+            "should-remain");
+
+  // Validate that mirror request has added headers
+  EXPECT_EQ(mirror_headers_->get(Http::LowerCaseString("x-mirror-test"))[0]->value(),
+            "mirror-value");
+  EXPECT_EQ(mirror_headers_->get(Http::LowerCaseString("x-mirror-static"))[0]->value(),
+            "static-value");
+
+  // Validate that mirror request has removed sensitive headers
+  EXPECT_TRUE(mirror_headers_->get(Http::LowerCaseString("x-sensitive-header")).empty());
+  EXPECT_TRUE(mirror_headers_->get(Http::LowerCaseString("authorization")).empty());
+
+  // Validate that non-sensitive headers are preserved in mirror
+  EXPECT_EQ(mirror_headers_->get(Http::LowerCaseString("x-custom-header"))[0]->value(),
+            "should-remain");
+
+  EXPECT_EQ(mirror_headers_->getHostValue(), "shadow-target.example.com");
+  EXPECT_EQ(upstream_headers_->getHostValue(), "sni.lyft.com");
+
+  cleanupUpstreamAndDownstream();
 }
 
 } // namespace

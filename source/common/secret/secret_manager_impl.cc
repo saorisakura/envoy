@@ -129,36 +129,33 @@ GenericSecretConfigProviderSharedPtr SecretManagerImpl::createInlineGenericSecre
 
 TlsCertificateConfigProviderSharedPtr SecretManagerImpl::findOrCreateTlsCertificateProvider(
     const envoy::config::core::v3::ConfigSource& sds_config_source, const std::string& config_name,
-    Server::Configuration::TransportSocketFactoryContext& secret_provider_context,
-    Init::Manager& init_manager) {
-  return certificate_providers_.findOrCreate(sds_config_source, config_name,
-                                             secret_provider_context, init_manager);
+    Server::Configuration::ServerFactoryContext& server_context, OptRef<Init::Manager> init_manager,
+    bool warm) {
+  return certificate_providers_.findOrCreate(sds_config_source, config_name, server_context,
+                                             init_manager, warm);
 }
 
 CertificateValidationContextConfigProviderSharedPtr
 SecretManagerImpl::findOrCreateCertificateValidationContextProvider(
     const envoy::config::core::v3::ConfigSource& sds_config_source, const std::string& config_name,
-    Server::Configuration::TransportSocketFactoryContext& secret_provider_context,
-    Init::Manager& init_manager) {
-  return validation_context_providers_.findOrCreate(sds_config_source, config_name,
-                                                    secret_provider_context, init_manager);
+    Server::Configuration::ServerFactoryContext& server_context, Init::Manager& init_manager) {
+  return validation_context_providers_.findOrCreate(sds_config_source, config_name, server_context,
+                                                    init_manager, true);
 }
 
 TlsSessionTicketKeysConfigProviderSharedPtr
 SecretManagerImpl::findOrCreateTlsSessionTicketKeysContextProvider(
     const envoy::config::core::v3::ConfigSource& sds_config_source, const std::string& config_name,
-    Server::Configuration::TransportSocketFactoryContext& secret_provider_context,
-    Init::Manager& init_manager) {
-  return session_ticket_keys_providers_.findOrCreate(sds_config_source, config_name,
-                                                     secret_provider_context, init_manager);
+    Server::Configuration::ServerFactoryContext& server_context, Init::Manager& init_manager) {
+  return session_ticket_keys_providers_.findOrCreate(sds_config_source, config_name, server_context,
+                                                     init_manager, true);
 }
 
 GenericSecretConfigProviderSharedPtr SecretManagerImpl::findOrCreateGenericSecretProvider(
     const envoy::config::core::v3::ConfigSource& sds_config_source, const std::string& config_name,
-    Server::Configuration::TransportSocketFactoryContext& secret_provider_context,
-    Init::Manager& init_manager) {
-  return generic_secret_providers_.findOrCreate(sds_config_source, config_name,
-                                                secret_provider_context, init_manager);
+    Server::Configuration::ServerFactoryContext& server_context, Init::Manager& init_manager) {
+  return generic_secret_providers_.findOrCreate(sds_config_source, config_name, server_context,
+                                                init_manager, true);
 }
 
 ProtobufTypes::MessagePtr
@@ -237,7 +234,7 @@ SecretManagerImpl::dumpSecretConfigs(const Matchers::StringMatcher& name_matcher
     const bool secret_ready = tls_cert != nullptr;
     envoy::extensions::transport_sockets::tls::v3::Secret secret;
     secret.set_name(secret_data.resource_name_);
-    ProtobufWkt::Timestamp last_updated_ts;
+    Protobuf::Timestamp last_updated_ts;
     TimestampUtil::systemClockToTimestamp(secret_data.last_updated_, last_updated_ts);
     secret.set_name(secret_data.resource_name_);
     if (secret_ready) {
@@ -275,7 +272,7 @@ SecretManagerImpl::dumpSecretConfigs(const Matchers::StringMatcher& name_matcher
     if (!name_matcher.match(secret.name())) {
       continue;
     }
-    ProtobufWkt::Timestamp last_updated_ts;
+    Protobuf::Timestamp last_updated_ts;
     envoy::admin::v3::SecretsConfigDump::DynamicSecret* dump_secret;
     TimestampUtil::systemClockToTimestamp(secret_data.last_updated_, last_updated_ts);
     if (secret_ready) {
@@ -303,7 +300,7 @@ SecretManagerImpl::dumpSecretConfigs(const Matchers::StringMatcher& name_matcher
     if (!name_matcher.match(secret.name())) {
       continue;
     }
-    ProtobufWkt::Timestamp last_updated_ts;
+    Protobuf::Timestamp last_updated_ts;
     TimestampUtil::systemClockToTimestamp(secret_data.last_updated_, last_updated_ts);
     envoy::admin::v3::SecretsConfigDump::DynamicSecret* dump_secret;
     if (secret_ready) {
@@ -332,7 +329,7 @@ SecretManagerImpl::dumpSecretConfigs(const Matchers::StringMatcher& name_matcher
     if (!name_matcher.match(secret.name())) {
       continue;
     }
-    ProtobufWkt::Timestamp last_updated_ts;
+    Protobuf::Timestamp last_updated_ts;
     TimestampUtil::systemClockToTimestamp(secret_data.last_updated_, last_updated_ts);
     envoy::admin::v3::SecretsConfigDump::DynamicSecret* dump_secret;
     if (secret_ready) {

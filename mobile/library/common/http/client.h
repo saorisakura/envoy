@@ -53,13 +53,17 @@ struct HttpClientStats {
 class Client : public Logger::Loggable<Logger::Id::http> {
 public:
   Client(ApiListenerPtr&& api_listener, Event::ProvisionalDispatcher& dispatcher,
-         Stats::Scope& scope, Random::RandomGenerator& random)
+         Stats::Scope& scope, Random::RandomGenerator& random,
+         absl::optional<size_t> high_watermark = absl::nullopt)
       : api_listener_(std::move(api_listener)), dispatcher_(dispatcher),
         stats_(
             HttpClientStats{ALL_HTTP_CLIENT_STATS(POOL_COUNTER_PREFIX(scope, "http.client."),
                                                   POOL_HISTOGRAM_PREFIX(scope, "http.client."))}),
         address_provider_(std::make_shared<Network::Address::SyntheticAddressImpl>(), nullptr),
-        random_(random) {}
+        // Default to 2M per stream. This is fairly arbitrary and will result in
+        // Envoy buffering up to 1M + flow-control-window for HTTP/2 and HTTP/3,
+        // and having local data of 2M + kernel-buffer-limit for HTTP/1.1
+        random_(random), high_watermark_(high_watermark.value_or(2 * 1024 * 1024)) {}
 
   /**
    * Attempts to open a new stream to the remote. Note that this function is asynchronous and
@@ -126,6 +130,7 @@ public:
 
   const HttpClientStats& stats() const;
   Event::ScopeTracker& scopeTracker() const { return dispatcher_; }
+  size_t highWatermark() const { return high_watermark_; }
 
   TimeSource& timeSource() { return dispatcher_.timeSource(); }
 
@@ -168,7 +173,7 @@ private:
       IS_ENVOY_BUG("Unexpected 100 continue"); // proxy_100_continue_ false by default.
     }
     bool streamErrorOnInvalidHttpMessage() const override { return false; }
-    void setRequestDecoder(RequestDecoder& /*decoder*/) override{};
+    void setRequestDecoder(RequestDecoder& /*decoder*/) override {};
     void setDeferredLoggingHeadersAndTrailers(Http::RequestHeaderMapConstSharedPtr,
                                               Http::ResponseHeaderMapConstSharedPtr,
                                               Http::ResponseTrailerMapConstSharedPtr,
@@ -275,6 +280,8 @@ private:
     // ScopeTrackedObject
     void dumpState(std::ostream& os, int indent_level = 0) const override;
 
+    absl::optional<uint32_t> codecStreamId() const override { return absl::nullopt; }
+
     void setResponseDetails(absl::string_view response_details) {
       response_details_ = response_details;
     }
@@ -331,6 +338,7 @@ private:
     // Set true in explicit flow control mode if the library has sent body data and may want to
     // send more when buffer is available.
     bool wants_write_notification_{};
+    Event::SchedulableCallbackPtr scheduled_callback_;
     // True if the bridge should operate in explicit flow control mode.
     //
     // In this mode only one callback can be sent to the bridge until more is
@@ -383,7 +391,6 @@ private:
 
   ApiListenerPtr api_listener_;
   Event::ProvisionalDispatcher& dispatcher_;
-  Event::SchedulableCallbackPtr scheduled_callback_;
   HttpClientStats stats_;
   // The set of open streams, which can safely have request data sent on them
   // or response data received.
@@ -394,6 +401,7 @@ private:
   // Shared synthetic address providers across DirectStreams.
   Network::ConnectionInfoSetterImpl address_provider_;
   Random::RandomGenerator& random_;
+  const size_t high_watermark_;
 };
 
 using ClientPtr = std::unique_ptr<Client>;

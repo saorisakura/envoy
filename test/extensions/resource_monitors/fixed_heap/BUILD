@@ -15,9 +15,11 @@ envoy_extension_cc_test(
     name = "fixed_heap_monitor_test",
     srcs = ["fixed_heap_monitor_test.cc"],
     extension_names = ["envoy.resource_monitors.fixed_heap"],
-    external_deps = ["abseil_optional"],
+    rbe_pool = "6gig",
     deps = [
         "//source/extensions/resource_monitors/fixed_heap:fixed_heap_monitor",
+        "//test/test_common:test_runtime_lib",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/extensions/resource_monitors/fixed_heap/v3:pkg_cc_proto",
     ],
 )
@@ -26,6 +28,7 @@ envoy_extension_cc_test(
     name = "config_test",
     srcs = ["config_test.cc"],
     extension_names = ["envoy.resource_monitors.fixed_heap"],
+    rbe_pool = "6gig",
     deps = [
         "//envoy/registry",
         "//source/common/stats:isolated_store_lib",

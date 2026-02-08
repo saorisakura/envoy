@@ -1,6 +1,7 @@
 #include "source/common/network/socket_option_factory.h"
 
 #include "envoy/config/core/v3/base.pb.h"
+#include "envoy/network/address.h"
 
 #include "source/common/common/fmt.h"
 #include "source/common/network/addr_family_aware_socket_option_impl.h"
@@ -13,6 +14,9 @@ namespace Network {
 std::unique_ptr<Socket::Options>
 SocketOptionFactory::buildTcpKeepaliveOptions(Network::TcpKeepaliveConfig keepalive_config) {
   std::unique_ptr<Socket::Options> options = std::make_unique<Socket::Options>();
+  if (isTcpKeepaliveConfigDisabled(keepalive_config)) {
+    return options;
+  }
   absl::optional<Network::Socket::Type> tcp_only = {Network::Socket::Type::Stream};
   options->push_back(std::make_shared<Network::SocketOptionImpl>(
       envoy::config::core::v3::SocketOption::STATE_PREBIND, ENVOY_SOCKET_SO_KEEPALIVE, 1,
@@ -110,12 +114,27 @@ std::unique_ptr<Socket::Options> SocketOptionFactory::buildLiteralOptions(
     } else if (socket_option.has_type() && socket_option.type().has_datagram()) {
       socket_type = Network::Socket::Type::Datagram;
     }
+    absl::optional<Network::Address::IpVersion> socket_ip_version = absl::nullopt;
+    switch (socket_option.ip_version()) {
+    case envoy::config::core::v3::SocketOption::SOCKET_IP_VERSION_UNSPECIFIED:
+      break;
+    case envoy::config::core::v3::SocketOption::SOCKET_IP_VERSION_IPV4:
+      socket_ip_version = Network::Address::IpVersion::v4;
+      break;
+    case envoy::config::core::v3::SocketOption::SOCKET_IP_VERSION_IPV6:
+      socket_ip_version = Network::Address::IpVersion::v6;
+      break;
+    default:
+      ENVOY_LOG(warn, "Socket option specified with unknown ip_version: {}",
+                socket_option.DebugString());
+      break;
+    }
     options->emplace_back(std::make_shared<Network::SocketOptionImpl>(
         socket_option.state(),
         Network::SocketOptionName(
             socket_option.level(), socket_option.name(),
             fmt::format("{}/{}", socket_option.level(), socket_option.name())),
-        buf, socket_type));
+        buf, socket_type, socket_ip_version));
   }
   return options;
 }
@@ -178,6 +197,41 @@ std::unique_ptr<Socket::Options> SocketOptionFactory::buildIpRecvTosOptions() {
   options->push_back(std::make_shared<AddrFamilyAwareSocketOptionImpl>(
       envoy::config::core::v3::SocketOption::STATE_PREBIND, ENVOY_SOCKET_IP_RECVTOS,
       ENVOY_SOCKET_IPV6_RECVTCLASS, 1));
+  return options;
+}
+
+std::unique_ptr<Socket::Options> SocketOptionFactory::buildBindAddressNoPort() {
+  std::unique_ptr<Socket::Options> options = std::make_unique<Socket::Options>();
+  options->push_back(
+      std::make_shared<SocketOptionImpl>(envoy::config::core::v3::SocketOption::STATE_PREBIND,
+                                         ENVOY_SOCKET_IP_BIND_ADDRESS_NO_PORT, 1));
+  return options;
+}
+
+std::unique_ptr<Socket::Options>
+SocketOptionFactory::buildDoNotFragmentOptions(bool supports_v4_mapped_v6_addresses) {
+  auto options = std::make_unique<Socket::Options>();
+#ifdef ENVOY_IP_DONTFRAG
+  options->push_back(std::make_shared<AddrFamilyAwareSocketOptionImpl>(
+      envoy::config::core::v3::SocketOption::STATE_PREBIND, ENVOY_IP_DONTFRAG, ENVOY_IPV6_DONTFRAG,
+      1));
+  // v4 mapped v6 addresses don't support ENVOY_IP_DONTFRAG on MAC OS.
+  (void)supports_v4_mapped_v6_addresses;
+#elif defined(ENVOY_IP_MTU_DISCOVER)
+  options->push_back(std::make_shared<AddrFamilyAwareSocketOptionImpl>(
+      envoy::config::core::v3::SocketOption::STATE_PREBIND, ENVOY_IP_MTU_DISCOVER,
+      ENVOY_IP_MTU_DISCOVER_VALUE, ENVOY_IPV6_MTU_DISCOVER, ENVOY_IPV6_MTU_DISCOVER_VALUE));
+
+  if (supports_v4_mapped_v6_addresses) {
+    ENVOY_LOG_MISC(trace, "Also apply the V4 option to v6 socket to support v4-mapped addresses.");
+    options->push_back(
+        std::make_shared<SocketOptionImpl>(envoy::config::core::v3::SocketOption::STATE_PREBIND,
+                                           ENVOY_IP_MTU_DISCOVER, ENVOY_IP_MTU_DISCOVER_VALUE));
+  }
+#else
+  (void)supports_v4_mapped_v6_addresses;
+  ENVOY_LOG_MISC(trace, "Platform supports neither socket option IP_DONTFRAG nor IP_MTU_DISCOVER");
+#endif
   return options;
 }
 

@@ -45,8 +45,7 @@ public:
   void SendPublicReset(const quic::QuicSocketAddress& self_address,
                        const quic::QuicSocketAddress& peer_address,
                        quic::QuicConnectionId connection_id, bool ietf_quic,
-                       size_t received_packet_length,
-                       std::unique_ptr<quic::QuicPerPacketContext> packet_context) override;
+                       size_t received_packet_length) override;
 
 private:
   QuicDispatcherStats& stats_;
@@ -65,7 +64,7 @@ public:
       Network::Socket& listen_socket, QuicStatNames& quic_stat_names,
       EnvoyQuicCryptoServerStreamFactoryInterface& crypto_server_stream_factory,
       quic::ConnectionIdGeneratorInterface& generator,
-      EnvoyQuicConnectionDebugVisitorFactoryInterfaceOptRef&& debug_visitor_factory);
+      EnvoyQuicConnectionDebugVisitorFactoryInterfaceOptRef debug_visitor_factory);
 
   // quic::QuicDispatcher
   void OnConnectionClosed(quic::QuicConnectionId connection_id, quic::QuicErrorCode error,

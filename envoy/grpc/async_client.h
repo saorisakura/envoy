@@ -29,6 +29,26 @@ public:
    * Signals that the request should be cancelled. No further callbacks will be invoked.
    */
   virtual void cancel() PURE;
+
+  /**
+   * Returns the underlying stream info.
+   */
+  virtual const StreamInfo::StreamInfo& streamInfo() const PURE;
+
+  /**
+   * Detach the pending request. This is used for the case where we send a side
+   * request but never cancel it even if the related downstream main request is
+   * completed.
+   *
+   * This will will clean up all context associated with downstream request like
+   * downstream stream info, parent tracing span, and so on, to avoid potential
+   * dangling references.
+   *
+   * NOTE: the callbacks that registered to take the response will be kept to do
+   * some clean up or operations when response arrives. The caller is responsible
+   * for ensuring that the callbacks have enough lifetime.
+   */
+  virtual void detach() PURE;
 };
 
 /**
@@ -59,6 +79,14 @@ public:
    * stream object and no further callbacks will be invoked.
    */
   virtual void resetStream() PURE;
+
+  /**
+   * Wait for the server to half-close its stream and then delete the RawAsyncStream object. No
+   * further methods may be invoked on the stream object and no further callbacks will be invoked.
+   * The server is expected to half-close within the interval specific in the StreamOptions,
+   * otherwise the stream is reset.
+   */
+  virtual void waitForRemoteCloseAndDelete() PURE;
 
   /***
    * @returns if the stream has enough buffered outbound data to be over the configured buffer

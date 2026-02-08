@@ -34,6 +34,9 @@ type (
 	EmptyDownstreamFilter struct{}
 	// EmptyUpstreamFilter provides the no-op implementation of the UpstreamFilter interface
 	EmptyUpstreamFilter struct{}
+
+	// PassThroughHttpTcpBridge provides the no-op implementation of the HttpTcpBridge interface
+	PassThroughHttpTcpBridge struct{}
 )
 
 // request
@@ -105,14 +108,22 @@ func (*PassThroughStreamFilter) OnDestroy(DestroyReason) {
 func (*PassThroughStreamFilter) OnStreamComplete() {
 }
 
+type Config interface {
+	// Called when the current config is deleted due to an update or removal of plugin.
+	// You can use this method is you store some resources in the config to be released later.
+	Destroy()
+}
+
 type StreamFilterConfigParser interface {
 	// Parse the proto message to any Go value, and return error to reject the config.
 	// This is called when Envoy receives the config from the control plane.
 	// Also, you can define Metrics through the callbacks, and the callbacks will be nil when parsing the route config.
+	// You can return a config implementing the Config interface if you need fine control over its lifecycle.
 	Parse(any *anypb.Any, callbacks ConfigCallbackHandler) (interface{}, error)
 	// Merge the two configs(filter level config or route level config) into one.
 	// May merge multi-level configurations, i.e. filter level, virtualhost level, router level and weighted cluster level,
 	// into a single one recursively, by invoking this method multiple times.
+	// You can return a config implementing the Config interface if you need fine control over its lifecycle.
 	Merge(parentConfig interface{}, childConfig interface{}) interface{}
 }
 
@@ -149,6 +160,10 @@ type StreamInfo interface {
 	VirtualClusterName() (string, bool)
 	// WorkerID returns the ID of the Envoy worker thread
 	WorkerID() uint32
+	// DrainConnectionUponCompletion marks the connection to be drained after the current request completes.
+	// For HTTP/1.x, this will add a "Connection: close" header to the response.
+	// For HTTP/2 and HTTP/3, this will send a GOAWAY frame after the response is sent.
+	DrainConnectionUponCompletion()
 	// Some fields in stream info can be fetched via GetProperty
 	// For example, startTime() is equal to GetProperty("request.time")
 }
@@ -159,6 +174,8 @@ type StreamFilterCallbacks interface {
 	// ClearRouteCache clears the route cache for the current request, and filtermanager will re-fetch the route in the next filter.
 	// Please be careful to invoke it, since filtermanager will raise an 404 route_not_found response when failed to re-fetch a route.
 	ClearRouteCache()
+	// RefreshRouteCache works like ClearRouteCache, but it will re-fetch the route immediately.
+	RefreshRouteCache()
 	Log(level LogType, msg string)
 	LogLevel() LogType
 	// GetProperty fetch Envoy attribute and return the value as a string.
@@ -173,6 +190,11 @@ type StreamFilterCallbacks interface {
 	// * ErrValueNotFound
 	GetProperty(key string) (string, error)
 	// TODO add more for filter callbacks
+
+	// Get secret manager.
+	// Secrets should be defined in the plugin configuration.
+	// It is safe to use this secret manager from any goroutine.
+	SecretManager() SecretManager
 }
 
 // FilterProcessCallbacks is the interface for filter to process request/response in decode/encode phase.
@@ -182,10 +204,33 @@ type FilterProcessCallbacks interface {
 	SendLocalReply(responseCode int, bodyText string, headers map[string][]string, grpcStatus int64, details string)
 	// RecoverPanic recover panic in defer and terminate the request by SendLocalReply with 500 status code.
 	RecoverPanic()
+	// AddData add extra data when processing headers/trailers.
+	// For example, turn a headers only request into a request with a body, add more body when processing trailers, and so on.
+	// The second argument isStreaming supplies if this caller streams data or buffers the full body.
+	AddData(data []byte, isStreaming bool)
+	// InjectData inject the content of slice data via Envoy StreamXXFilterCallbacks's injectXXDataToFilterChaininjectData.
+	InjectData(data []byte)
 }
 
 type DecoderFilterCallbacks interface {
 	FilterProcessCallbacks
+
+	// SetUpstreamOverrideHost sets an upstream address override for the request.
+	// When the overridden host is available and can be selected directly, the load balancer bypasses its algorithm
+	// and routes traffic directly to the specified host. The strict flag determines whether the HTTP request must
+	// strictly use the overridden destination. If the destination is unavailable and strict is set to true, Envoy
+	// responds with a 503 Service Unavailable error.
+	//
+	// The function takes two arguments:
+	//
+	// host (string): The upstream host address to use for the request. This must be a valid IP address(with port);
+	// otherwise, it will return an error.
+	//
+	// strict (boolean): Determines whether the HTTP request must be strictly routed to the requested
+	// host. When set to ``true``, if the requested host is unavailable, Envoy will return a 503 status code.
+	// The default value is ``false``, which allows Envoy to fall back to its load balancing mechanism. In this case, if the
+	// requested host is not found, the request will be routed according to the load balancing algorithm.
+	SetUpstreamOverrideHost(host string, strict bool) error
 }
 
 type EncoderFilterCallbacks interface {
@@ -295,6 +340,12 @@ type FilterState interface {
 	GetString(key string) string
 }
 
+type SecretManager interface {
+	// Get generic secret from secret manager.
+	// bool is false on missing secret
+	GetGenericSecret(name string) (string, bool)
+}
+
 type MetricType uint32
 
 const (
@@ -329,4 +380,54 @@ type GaugeMetric interface {
 
 // TODO
 type HistogramMetric interface {
+}
+
+type HttpTcpBridgeCallbackHandler interface {
+	// GetRouteName returns the name of the route which got matched
+	GetRouteName() string
+	// GetVirtualClusterName returns the name of the virtual cluster which got matched
+	GetVirtualClusterName() string
+	// SetSelfHalfCloseForUpstreamConn default is false
+	SetSelfHalfCloseForUpstreamConn(enabled bool)
+}
+
+type HttpTcpBridge interface {
+
+	// Invoked when header is delivered from the downstream.
+	// Notice-1: when return HttpTcpBridgeContinue or HttpTcpBridgeStopAndBuffer, dataForSet is used to be sent to upstream; when return HttpTcpBridgeEndStream, dataForSet is useed to sent to downstream as response body.
+	// Notice-2: headerMap and dataToUpstream cannot be invoked after the func return.
+	EncodeHeaders(headerMap RequestHeaderMap, dataForSet BufferInstance, endOfStream bool) HttpTcpBridgeStatus
+
+	// Streaming, Invoked when data is delivered from the downstream.
+	// Notice: buffer cannot be invoked after the func return.
+	EncodeData(buffer BufferInstance, endOfStream bool) HttpTcpBridgeStatus
+
+	// Streaming, Called when data is read on from tcp upstream.
+	// Notice-1: when return HttpTcpBridgeContinue, resp headers will be send to http all at once; from then on, you MUST NOT invoke responseHeaderForSet at any time(or you will get panic).
+	// Notice-2: responseHeaderForSet and buffer cannot be invoked after the func return.
+	OnUpstreamData(responseHeaderForSet ResponseHeaderMap, buffer BufferInstance, endOfStream bool) HttpTcpBridgeStatus
+
+	// destroy filter
+	OnDestroy()
+}
+
+func (*PassThroughHttpTcpBridge) EncodeHeaders(headerMap RequestHeaderMap, dataForSet BufferInstance, endOfStream bool) HttpTcpBridgeStatus {
+	return HttpTcpBridgeContinue
+}
+
+func (*PassThroughHttpTcpBridge) EncodeData(buffer BufferInstance, endOfStream bool) HttpTcpBridgeStatus {
+	return HttpTcpBridgeContinue
+}
+
+func (*PassThroughHttpTcpBridge) OnUpstreamData(responseHeaderForSet ResponseHeaderMap, buffer BufferInstance, endOfStream bool) HttpTcpBridgeStatus {
+	return HttpTcpBridgeContinue
+}
+
+func (*PassThroughHttpTcpBridge) OnDestroy() {
+}
+
+type HttpTcpBridgeFactory func(config interface{}, callbacks HttpTcpBridgeCallbackHandler) HttpTcpBridge
+
+type HttpTcpBridgeConfigParser interface {
+	Parse(any *anypb.Any) (interface{}, error)
 }

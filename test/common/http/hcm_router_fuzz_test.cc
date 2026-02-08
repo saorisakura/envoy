@@ -12,7 +12,7 @@
 #include "source/extensions/upstreams/http/tcp/upstream_request.h"
 
 #include "test/common/http/conn_manager_impl_test_base.h"
-#include "test/common/http/hcm_router_fuzz.pb.h"
+#include "test/common/http/hcm_router_fuzz.pb.validate.h"
 #include "test/common/stats/stat_test_utility.h"
 #include "test/fuzz/fuzz_runner.h"
 #include "test/fuzz/utility.h"
@@ -217,8 +217,13 @@ public:
     ON_CALL(mock_route_->route_entry_.early_data_policy_, allowsEarlyDataForRequest(_))
         .WillByDefault(Return(allows_early_data_for_request_));
     route_ = Router::RouteConstSharedPtr(mock_route_);
+    vhost_ = mock_route_->virtual_host_;
 
     ON_CALL(*tlc_.cluster_.info_, maintenanceMode()).WillByDefault(Return(maintenance_));
+    mock_host_ = std::make_shared<NiceMock<Envoy::Upstream::MockHost>>();
+    ON_CALL(tlc_, chooseHost(_)).WillByDefault(Invoke([this](Upstream::LoadBalancerContext*) {
+      return Upstream::HostSelectionResponse{mock_host_, "foo"};
+    }));
   }
 
   void newUpstream(Router::GenericConnectionPoolCallbacks* request,
@@ -277,8 +282,8 @@ public:
     direct_response_entry_ = std::make_unique<Router::MockDirectResponseEntry>();
     direct_response_body_ = body;
     ON_CALL(*direct_response_entry_, responseCode()).WillByDefault(Return(code));
-    ON_CALL(*direct_response_entry_, responseBody())
-        .WillByDefault(ReturnRef(direct_response_body_));
+    ON_CALL(*direct_response_entry_, formatBody(_, _, _, _))
+        .WillByDefault(Return(direct_response_body_));
     ON_CALL(*direct_response_entry_, newUri(_)).WillByDefault(Return(new_uri));
     ON_CALL(*mock_route_, directResponseEntry())
         .WillByDefault(Return(direct_response_entry_.get()));
@@ -313,15 +318,17 @@ public:
   bool allows_early_data_for_request_{true};
 
   Router::MockRoute* mock_route_;
+  Router::VirtualHostConstSharedPtr vhost_;
   Router::RouteConstSharedPtr route_;
 
   bool maintenance_{false};
   StreamInfo::MockStreamInfo mock_stream_info_;
 
   std::vector<std::unique_ptr<FuzzUpstream>> upstreams_;
-  std::unique_ptr<Router::MockDirectResponseEntry> direct_response_entry_{};
+  std::unique_ptr<Router::MockDirectResponseEntry> direct_response_entry_;
 
-  std::string direct_response_body_{};
+  std::string direct_response_body_;
+  std::shared_ptr<NiceMock<Envoy::Upstream::MockHost>> mock_host_;
 };
 
 // This class holds the upstream `FuzzCluster` instances. This has nothing
@@ -375,13 +382,13 @@ public:
     }
   }
 
-  Router::RouteConstSharedPtr route(const Http::RequestHeaderMap& request_map) {
+  Router::VirtualHostRoute route(const Http::RequestHeaderMap& request_map) {
     absl::string_view path = request_map.Path()->value().getStringView();
     FuzzCluster* cluster = selectClusterByName(path);
     if (!cluster) {
-      return nullptr;
+      return {};
     }
-    return cluster->route_;
+    return {cluster->vhost_, cluster->route_};
   }
 
   Upstream::ThreadLocalCluster* getThreadLocalCluster(absl::string_view name) {
@@ -405,10 +412,11 @@ public:
   std::string name() const override { return "envoy.filters.connection_pools.http.generic"; }
   std::string category() const override { return "envoy.upstreams"; }
   Router::GenericConnPoolPtr
-  createGenericConnPool(Upstream::ThreadLocalCluster& thread_local_cluster,
+  createGenericConnPool(Upstream::HostConstSharedPtr,
+                        Upstream::ThreadLocalCluster& thread_local_cluster,
                         Router::GenericConnPoolFactory::UpstreamProtocol upstream_protocol,
                         Upstream::ResourcePriority, absl::optional<Envoy::Http::Protocol> protocol,
-                        Upstream::LoadBalancerContext*) const override {
+                        Upstream::LoadBalancerContext*, const Protobuf::Message&) const override {
     if (upstream_protocol != UpstreamProtocol::HTTP) {
       return nullptr;
     }
@@ -438,23 +446,22 @@ public:
   FuzzConfig(Protobuf::RepeatedPtrField<std::string> strict_headers_to_check)
       : pool_(fake_stats_.symbolTable()), fuzz_conn_pool_factory_(cluster_manager_),
         reg_(fuzz_conn_pool_factory_), router_context_(fake_stats_.symbolTable()),
-        shadow_writer_(new NiceMock<Router::MockShadowWriter>()),
-        filter_config_(std::make_shared<Router::FilterConfig>(
-            factory_context_, pool_.add("fuzz_filter"), local_info_, *fake_stats_.rootScope(), cm_,
-            runtime_, random_, Router::ShadowWriterPtr{shadow_writer_}, true /*emit_dynamic_stats*/,
-            false /*start_child_span*/, true /*suppress_envoy_headers*/,
-            false /*respect_expected_rq_timeout*/,
-            true /*suppress_grpc_request_failure_code_stats*/,
-            false /*flush_upstream_log_on_upstream_stream*/, std::move(strict_headers_to_check),
-            time_system_.timeSystem(), http_context_, router_context_)) {
+        shadow_writer_(new NiceMock<Router::MockShadowWriter>()) {
+    ON_CALL(factory_context_, localInfo()).WillByDefault(ReturnRef(local_info_));
+    filter_config_ = std::make_shared<Router::FilterConfig>(
+        factory_context_, pool_.add("fuzz_filter"), *fake_stats_.rootScope(), cm_, runtime_,
+        random_, Router::ShadowWriterPtr{shadow_writer_}, true /*emit_dynamic_stats*/,
+        false /*start_child_span*/, true /*suppress_envoy_headers*/,
+        false /*respect_expected_rq_timeout*/, true /*suppress_grpc_request_failure_code_stats*/,
+        false /*flush_upstream_log_on_upstream_stream*/,
+        false /*reject_connect_request_early_data*/, std::move(strict_headers_to_check),
+        time_system_.timeSystem(), http_context_, router_context_);
     cluster_manager_.createDefaultClusters(*this);
     // Install the `RouterFuzzFilter` here
     ON_CALL(filter_factory_, createFilterChain(_))
-        .WillByDefault(Invoke([this](FilterChainManager& manager) -> bool {
-          FilterFactoryCb decoder_filter_factory = [this](FilterChainFactoryCallbacks& callbacks) {
-            callbacks.addStreamDecoderFilter(RouterFuzzFilter::create(filter_config_));
-          };
-          manager.applyFilterFactoryCb({}, decoder_filter_factory);
+        .WillByDefault(Invoke([this](FilterChainFactoryCallbacks& callbacks) -> bool {
+          callbacks.setFilterConfigName("");
+          callbacks.addStreamDecoderFilter(RouterFuzzFilter::create(filter_config_));
           return true;
         }));
     ON_CALL(*route_config_provider_.route_config_, route(_, _, _, _))
@@ -484,13 +491,13 @@ public:
   Event::SimulatedTimeSystem time_system_;
 
 private:
+  NiceMock<LocalInfo::MockLocalInfo> local_info_;
   NiceMock<Server::Configuration::StatelessMockServerFactoryContext> factory_context_;
   Stats::StatNamePool pool_;
   FuzzClusterManager cluster_manager_;
   FuzzGenericConnPoolFactory fuzz_conn_pool_factory_;
   Registry::InjectFactory<Router::GenericConnPoolFactory> reg_;
   Router::ContextImpl router_context_;
-  NiceMock<LocalInfo::MockLocalInfo> local_info_;
   NiceMock<Runtime::MockLoader> runtime_;
   Router::MockShadowWriter* shadow_writer_;
   std::shared_ptr<Router::FilterConfig> filter_config_;
@@ -507,7 +514,8 @@ public:
   void fuzz(const FuzzCase& input) {
     hcm_ = std::make_unique<ConnectionManagerImpl>(
         hcm_config_, drain_close_, random_, hcm_config_->http_context_, runtime_, local_info_,
-        hcm_config_->cm_, overload_manager_, hcm_config_->time_system_);
+        hcm_config_->cm_, overload_manager_, hcm_config_->time_system_,
+        envoy::config::core::v3::TrafficDirection::UNSPECIFIED);
     hcm_->initializeReadFilterCallbacks(filter_callbacks_);
     Buffer::OwnedImpl data;
     hcm_->onData(data, false);
@@ -601,6 +609,12 @@ private:
 #ifdef _DISABLE_STATIC_HARNESS
 
 DEFINE_PROTO_FUZZER(FuzzCase& input) {
+  try {
+    TestUtility::validate(input);
+  } catch (const EnvoyException& e) {
+    ENVOY_LOG_MISC(debug, "EnvoyException during validation: {}", e.what());
+    return;
+  }
   auto harness = std::make_unique<Harness>();
   harness->fuzz(input);
 }
@@ -610,6 +624,12 @@ DEFINE_PROTO_FUZZER(FuzzCase& input) {
 static std::unique_ptr<Harness> harness = nullptr;
 static void cleanup() { harness = nullptr; }
 DEFINE_PROTO_FUZZER(FuzzCase& input) {
+  try {
+    TestUtility::validate(input);
+  } catch (const EnvoyException& e) {
+    ENVOY_LOG_MISC(debug, "EnvoyException during validation: {}", e.what());
+    return;
+  }
   if (harness == nullptr) {
     harness = std::make_unique<Harness>();
     atexit(cleanup);

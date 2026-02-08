@@ -71,6 +71,12 @@ struct UpstreamInfoImpl : public UpstreamInfo {
   const std::string& upstreamTransportFailureReason() const override {
     return upstream_transport_failure_reason_;
   }
+  void setUpstreamDetectedCloseType(DetectedCloseType close_type) override {
+    upstream_detected_close_type_ = close_type;
+  }
+  DetectedCloseType upstreamDetectedCloseType() const override {
+    return upstream_detected_close_type_;
+  }
   void setUpstreamHost(Upstream::HostDescriptionConstSharedPtr host) override {
     upstream_host_ = host;
   }
@@ -94,7 +100,7 @@ struct UpstreamInfoImpl : public UpstreamInfo {
   void setUpstreamProtocol(Http::Protocol protocol) override { upstream_protocol_ = protocol; }
   absl::optional<Http::Protocol> upstreamProtocol() const override { return upstream_protocol_; }
 
-  Upstream::HostDescriptionConstSharedPtr upstream_host_{};
+  Upstream::HostDescriptionConstSharedPtr upstream_host_;
   Network::Address::InstanceConstSharedPtr upstream_local_address_;
   Network::Address::InstanceConstSharedPtr upstream_remote_address_;
   UpstreamTiming upstream_timing_;
@@ -102,6 +108,7 @@ struct UpstreamInfoImpl : public UpstreamInfo {
   absl::optional<uint64_t> upstream_connection_id_;
   absl::optional<std::string> upstream_connection_interface_name_;
   std::string upstream_transport_failure_reason_;
+  DetectedCloseType upstream_detected_close_type_{DetectedCloseType::Normal};
   FilterStateSharedPtr upstream_filter_state_;
   size_t num_streams_{};
   absl::optional<Http::Protocol> upstream_protocol_;
@@ -192,6 +199,18 @@ struct StreamInfoImpl : public StreamInfo {
     return {*downstream_timing_};
   }
 
+  void addCustomFlag(absl::string_view flag) override {
+    ASSERT(!ResponseFlagUtils::responseFlagsMap().contains(flag));
+    ASSERT(!StringUtil::hasEmptySpace(flag));
+    if (custom_flags_.empty()) {
+      custom_flags_.append(flag.data(), flag.size());
+    } else {
+      custom_flags_.push_back(',');
+      custom_flags_.append(flag.data(), flag.size());
+    }
+  }
+  absl::string_view customFlags() const override { return custom_flags_; }
+
   void addBytesReceived(uint64_t bytes_received) override { bytes_received_ += bytes_received; }
 
   uint64_t bytesReceived() const override { return bytes_received_; }
@@ -221,8 +240,11 @@ struct StreamInfoImpl : public StreamInfo {
   void setResponseCode(uint32_t code) override { response_code_ = code; }
 
   void setResponseCodeDetails(absl::string_view rc_details) override {
-    // Callers should sanitize with StringUtil::replaceAllEmptySpace if necessary.
-    ASSERT(!StringUtil::hasEmptySpace(rc_details));
+    // Callers should make sure that the rc_details does not contain a new line character.
+    // Whitespaces are allowed and are replaced by '_' or left intact depending the on the
+    // formatter processing this value.
+    ASSERT(!StringUtil::hasNewLine(rc_details));
+
     response_code_details_.emplace(rc_details);
   }
 
@@ -284,16 +306,18 @@ struct StreamInfoImpl : public StreamInfo {
     return *downstream_connection_info_provider_;
   }
 
+  const Router::VirtualHostConstSharedPtr& virtualHost() const override { return vhost_; }
+
   Router::RouteConstSharedPtr route() const override { return route_; }
 
   envoy::config::core::v3::Metadata& dynamicMetadata() override { return metadata_; };
   const envoy::config::core::v3::Metadata& dynamicMetadata() const override { return metadata_; };
 
-  void setDynamicMetadata(const std::string& name, const ProtobufWkt::Struct& value) override {
+  void setDynamicMetadata(const std::string& name, const Protobuf::Struct& value) override {
     (*metadata_.mutable_filter_metadata())[name].MergeFrom(value);
   };
 
-  void setDynamicTypedMetadata(const std::string& name, const ProtobufWkt::Any& value) override {
+  void setDynamicTypedMetadata(const std::string& name, const Protobuf::Any& value) override {
     (*metadata_.mutable_typed_filter_metadata())[name].MergeFrom(value);
   }
 
@@ -375,9 +399,11 @@ struct StreamInfoImpl : public StreamInfo {
     start_time_ = info.startTime();
     start_time_monotonic_ = info.startTimeMonotonic();
     downstream_transport_failure_reason_ = std::string(info.downstreamTransportFailureReason());
+    downstream_local_close_reason_ = std::string(info.downstreamLocalCloseReason());
     bytes_retransmitted_ = info.bytesRetransmitted();
     packets_retransmitted_ = info.packetsRetransmitted();
     should_drain_connection_ = info.shouldDrainConnectionUponCompletion();
+    codec_stream_id_ = info.codecStreamId();
   }
 
   // This function is used to copy over every field exposed in the StreamInfo interface, with a
@@ -389,6 +415,7 @@ struct StreamInfoImpl : public StreamInfo {
     setFromForRecreateStream(info);
     virtual_cluster_name_ = info.virtualClusterName();
     response_code_ = info.responseCode();
+    custom_flags_.assign(info.customFlags().data(), info.customFlags().size());
     response_code_details_ = info.responseCodeDetails();
     connection_termination_details_ = info.connectionTerminationDetails();
     upstream_info_ = info.upstreamInfo();
@@ -402,6 +429,7 @@ struct StreamInfoImpl : public StreamInfo {
                            other_response_flags.end());
     health_check_request_ = info.healthCheck();
     route_ = info.route();
+    vhost_ = info.virtualHost();
     metadata_ = info.dynamicMetadata();
     filter_state_ = info.filterState();
     request_headers_ = request_headers;
@@ -416,6 +444,7 @@ struct StreamInfoImpl : public StreamInfo {
     upstream_bytes_meter_ = info.getUpstreamBytesMeter();
     bytes_sent_ = info.bytesSent();
     is_shadow_ = info.isShadow();
+    codec_stream_id_ = info.codecStreamId();
     parent_stream_info_ = info.parentStreamInfo();
   }
 
@@ -428,6 +457,22 @@ struct StreamInfoImpl : public StreamInfo {
 
   absl::string_view downstreamTransportFailureReason() const override {
     return downstream_transport_failure_reason_;
+  }
+
+  void setDownstreamLocalCloseReason(absl::string_view failure_reason) override {
+    downstream_local_close_reason_ = std::string(failure_reason);
+  }
+
+  absl::string_view downstreamLocalCloseReason() const override {
+    return downstream_local_close_reason_;
+  }
+
+  void setDownstreamDetectedCloseType(DetectedCloseType close_type) override {
+    downstream_detected_close_type_ = close_type;
+  }
+
+  DetectedCloseType downstreamDetectedCloseType() const override {
+    return downstream_detected_close_type_;
   }
 
   bool shouldSchemeMatchUpstream() const override { return should_scheme_match_upstream_; }
@@ -450,6 +495,10 @@ struct StreamInfoImpl : public StreamInfo {
 
   void clearParentStreamInfo() override { parent_stream_info_.reset(); }
 
+  absl::optional<uint32_t> codecStreamId() const override { return codec_stream_id_; }
+
+  void setCodecStreamId(absl::optional<uint32_t> id) override { codec_stream_id_ = id; }
+
   TimeSource& time_source_;
   SystemTime start_time_;
   MonotonicTime start_time_monotonic_;
@@ -462,10 +511,11 @@ private:
   absl::optional<std::string> connection_termination_details_;
 
 public:
-  absl::InlinedVector<ResponseFlag, 4> response_flags_{};
-  bool health_check_request_{};
+  absl::InlinedVector<ResponseFlag, 4> response_flags_;
+  std::string custom_flags_;
   Router::RouteConstSharedPtr route_;
-  envoy::config::core::v3::Metadata metadata_{};
+  Router::VirtualHostConstSharedPtr vhost_;
+  envoy::config::core::v3::Metadata metadata_;
   FilterStateSharedPtr filter_state_;
 
 private:
@@ -481,24 +531,28 @@ private:
   }
 
   std::shared_ptr<UpstreamInfo> upstream_info_;
-  uint64_t bytes_received_{};
-  uint64_t bytes_retransmitted_{};
-  uint64_t packets_retransmitted_{};
-  uint64_t bytes_sent_{};
   const Network::ConnectionInfoProviderSharedPtr downstream_connection_info_provider_;
   const Http::RequestHeaderMap* request_headers_{};
   StreamIdProviderSharedPtr stream_id_provider_;
   absl::optional<DownstreamTiming> downstream_timing_;
   absl::optional<Upstream::ClusterInfoConstSharedPtr> upstream_cluster_info_;
-  Tracing::Reason trace_reason_;
   // Default construct the object because upstream stream is not constructed in some cases.
   BytesMeterSharedPtr upstream_bytes_meter_{std::make_shared<BytesMeter>()};
   BytesMeterSharedPtr downstream_bytes_meter_;
-  bool is_shadow_{false};
   std::string downstream_transport_failure_reason_;
+  std::string downstream_local_close_reason_;
+  DetectedCloseType downstream_detected_close_type_{DetectedCloseType::Normal};
+  OptRef<const StreamInfo> parent_stream_info_;
+  uint64_t bytes_received_{};
+  uint64_t bytes_retransmitted_{};
+  uint64_t packets_retransmitted_{};
+  uint64_t bytes_sent_{};
+  Tracing::Reason trace_reason_;
+  bool health_check_request_{};
   bool should_scheme_match_upstream_{false};
   bool should_drain_connection_{false};
-  OptRef<const StreamInfo> parent_stream_info_;
+  bool is_shadow_{false};
+  absl::optional<uint32_t> codec_stream_id_{};
 };
 
 } // namespace StreamInfo

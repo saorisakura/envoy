@@ -114,9 +114,27 @@ TEST(RoleBasedAccessControlFilterConfigFactoryTest, RouteSpecificConfig) {
   EXPECT_TRUE(proto_config.get());
 
   Router::RouteSpecificFilterConfigConstSharedPtr route_config =
-      factory.createRouteSpecificFilterConfig(*proto_config, context,
-                                              ProtobufMessage::getNullValidationVisitor());
+      factory
+          .createRouteSpecificFilterConfig(*proto_config, context,
+                                           ProtobufMessage::getNullValidationVisitor())
+          .value();
   EXPECT_TRUE(route_config.get());
+}
+
+TEST(RoleBasedAccessControlFilterConfigFactoryTest, ValidProtoWithServerContext) {
+  envoy::config::rbac::v3::Policy policy;
+  policy.add_permissions()->set_any(true);
+  policy.add_principals()->set_any(true);
+  envoy::extensions::filters::http::rbac::v3::RBAC config;
+  (*config.mutable_rules()->mutable_policies())["foo"] = policy;
+
+  NiceMock<Server::Configuration::MockServerFactoryContext> context;
+  RoleBasedAccessControlFilterConfigFactory factory;
+  Http::FilterFactoryCb cb =
+      factory.createFilterFactoryFromProtoWithServerContext(config, "stats", context);
+  Http::MockFilterChainFactoryCallbacks filter_callbacks;
+  EXPECT_CALL(filter_callbacks, addStreamDecoderFilter(_));
+  cb(filter_callbacks);
 }
 
 } // namespace

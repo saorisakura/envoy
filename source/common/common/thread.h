@@ -7,6 +7,7 @@
 
 #include "envoy/thread/thread.h"
 
+#include "source/common/common/assert.h"
 #include "source/common/common/non_copyable.h"
 
 #include "absl/synchronization/mutex.h"
@@ -128,7 +129,7 @@ public:
 
     // First, use an atomic load to see if the object has already been allocated.
     if (atomic_ref.load() == nullptr) {
-      absl::MutexLock lock(&mutex_);
+      absl::MutexLock lock(mutex_);
 
       // If that fails, check again under lock as two threads might have raced
       // to create the object.

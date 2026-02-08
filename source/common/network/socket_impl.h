@@ -14,9 +14,12 @@ class ConnectionInfoSetterImpl : public ConnectionInfoSetter {
 public:
   ConnectionInfoSetterImpl(const Address::InstanceConstSharedPtr& local_address,
                            const Address::InstanceConstSharedPtr& remote_address)
-      : local_address_(local_address), remote_address_(remote_address),
-        direct_remote_address_(remote_address) {}
+      : local_address_(local_address), direct_local_address_(local_address),
+        remote_address_(remote_address), direct_remote_address_(remote_address) {}
 
+  void setDirectLocalAddressForTest(const Address::InstanceConstSharedPtr& direct_local_address) {
+    direct_local_address_ = direct_local_address;
+  }
   void setDirectRemoteAddressForTest(const Address::InstanceConstSharedPtr& direct_remote_address) {
     direct_remote_address_ = direct_remote_address;
   }
@@ -32,6 +35,9 @@ public:
 
   // ConnectionInfoSetter
   const Address::InstanceConstSharedPtr& localAddress() const override { return local_address_; }
+  const Address::InstanceConstSharedPtr& directLocalAddress() const override {
+    return direct_local_address_;
+  }
   void setLocalAddress(const Address::InstanceConstSharedPtr& local_address) override {
     local_address_ = local_address;
   }
@@ -51,6 +57,15 @@ public:
   void setRequestedServerName(const absl::string_view requested_server_name) override {
     server_name_ = std::string(requested_server_name);
   }
+  const std::vector<std::string>& requestedApplicationProtocols() const override {
+    return application_protocols_;
+  }
+  void setRequestedApplicationProtocols(const std::vector<absl::string_view>& protocols) override {
+    application_protocols_.clear();
+    for (const auto& protocol : protocols) {
+      application_protocols_.emplace_back(protocol);
+    }
+  }
   absl::optional<uint64_t> connectionID() const override { return connection_id_; }
   void setConnectionID(uint64_t id) override { connection_id_ = id; }
   absl::optional<absl::string_view> interfaceName() const override { return interface_name_; }
@@ -68,6 +83,8 @@ public:
   }
   absl::string_view ja3Hash() const override { return ja3_hash_; }
   void setJA3Hash(const absl::string_view ja3_hash) override { ja3_hash_ = std::string(ja3_hash); }
+  absl::string_view ja4Hash() const override { return ja4_hash_; }
+  void setJA4Hash(const absl::string_view ja4_hash) override { ja4_hash_ = std::string(ja4_hash); }
   const absl::optional<std::chrono::milliseconds>& roundTripTime() const override {
     return round_trip_time_;
   }
@@ -89,15 +106,18 @@ public:
 
 private:
   Address::InstanceConstSharedPtr local_address_;
+  Address::InstanceConstSharedPtr direct_local_address_;
   bool local_address_restored_{false};
   Address::InstanceConstSharedPtr remote_address_;
   Address::InstanceConstSharedPtr direct_remote_address_;
   std::string server_name_;
+  std::vector<std::string> application_protocols_;
   absl::optional<uint64_t> connection_id_;
   bool allow_syscall_for_interface_name_{false};
   absl::optional<std::string> interface_name_;
   Ssl::ConnectionInfoConstSharedPtr ssl_info_;
   std::string ja3_hash_;
+  std::string ja4_hash_;
   absl::optional<std::chrono::milliseconds> round_trip_time_;
   FilterChainInfoConstSharedPtr filter_chain_info_;
   ListenerInfoConstSharedPtr listener_info_;

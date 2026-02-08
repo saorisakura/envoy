@@ -75,9 +75,9 @@ envoy_cc_library(
     name = "status_lib",
     srcs = ["status.cc"],
     hdrs = ["status.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         "//envoy/grpc:status",
+        "@abseil-cpp//absl/types:optional",
     ],
 )
 
@@ -85,7 +85,6 @@ envoy_cc_library(
     name = "common_lib",
     srcs = ["common.cc"],
     hdrs = ["common.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         "//envoy/http:header_map_interface",
         "//envoy/http:message_interface",
@@ -109,6 +108,7 @@ envoy_cc_library(
         "//source/common/http:message_lib",
         "//source/common/http:utility_lib",
         "//source/common/protobuf",
+        "@abseil-cpp//absl/types:optional",
     ],
 )
 
@@ -116,7 +116,6 @@ envoy_cc_library(
     name = "context_lib",
     srcs = ["context_impl.cc"],
     hdrs = ["context_impl.h"],
-    external_deps = ["abseil_optional"],
     deps = [
         ":common_lib",
         ":stat_names_lib",
@@ -126,6 +125,7 @@ envoy_cc_library(
         "//source/common/common:hash_lib",
         "//source/common/stats:symbol_table_lib",
         "//source/common/stats:utility_lib",
+        "@abseil-cpp//absl/types:optional",
     ],
 )
 
@@ -133,10 +133,7 @@ envoy_cc_library(
     name = "google_grpc_utils_lib",
     srcs = ["google_grpc_utils.cc"],
     hdrs = ["google_grpc_utils.h"],
-    external_deps = [
-        "abseil_optional",
-        "grpc",
-    ],
+    external_deps = ["grpc"],
     deps = [
         ":google_grpc_creds_lib",
         "//envoy/api:api_interface",
@@ -148,6 +145,7 @@ envoy_cc_library(
         "//source/common/common:macros",
         "//source/common/common:utility_lib",
         "//source/common/grpc:status_lib",
+        "@abseil-cpp//absl/types:optional",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
@@ -166,10 +164,7 @@ envoy_cc_library(
     name = "google_async_client_lib",
     srcs = ["google_async_client_impl.cc"],
     hdrs = ["google_async_client_impl.h"],
-    external_deps = [
-        "abseil_synchronization",
-        "grpc",
-    ],
+    external_deps = ["grpc"],
     deps = [
         ":context_lib",
         ":google_grpc_context_lib",
@@ -187,6 +182,7 @@ envoy_cc_library(
         "//source/common/common:linked_object",
         "//source/common/common:thread_annotations",
         "//source/common/tracing:http_tracer_lib",
+        "@abseil-cpp//absl/synchronization",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
 )
@@ -226,7 +222,7 @@ envoy_cc_library(
         ":buffered_message_ttl_manager_lib",
         ":typed_async_client_lib",
         "//source/common/protobuf:utility_lib",
-        "@com_google_absl//absl/container:btree",
+        "@abseil-cpp//absl/container:btree",
     ],
 )
 

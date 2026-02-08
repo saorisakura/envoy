@@ -14,9 +14,6 @@ envoy_cc_test_library(
     name = "benchmark_base_tester_lib",
     srcs = ["benchmark_base_tester.cc"],
     hdrs = ["benchmark_base_tester.h"],
-    external_deps = [
-        "benchmark",
-    ],
     deps = [
         "//source/common/common:random_generator_lib",
         "//source/common/memory:stats_lib",
@@ -25,13 +22,29 @@ envoy_cc_test_library(
         "//test/mocks/upstream:cluster_info_mocks",
         "//test/test_common:printers_lib",
         "//test/test_common:simulated_time_system_lib",
+        "@benchmark",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "locality_wrr_test",
+    srcs = ["locality_wrr_test.cc"],
+    deps = [
+        "//envoy/upstream:upstream_interface",
+        "//source/common/upstream:upstream_includes",
+        "//source/extensions/load_balancing_policies/common:locality_wrr_lib",
+        "//test/common/upstream:utility_lib",
+        "//test/mocks/upstream:cluster_info_mocks",
+        "//test/test_common:simulated_time_system_lib",
+        "//test/test_common:test_runtime_lib",
     ],
 )
 
 envoy_cc_test(
     name = "bounded_load_hlb_test",
     srcs = ["bounded_load_hlb_test.cc"],
+    rbe_pool = "6gig",
     deps = [
         "//source/common/upstream:upstream_includes",
         "//source/extensions/load_balancing_policies/common:thread_aware_lb_lib",
@@ -45,6 +58,7 @@ envoy_cc_test_library(
     name = "load_balancer_fuzz_lib",
     srcs = ["load_balancer_fuzz_base.cc"],
     hdrs = ["load_balancer_fuzz_base.h"],
+    rbe_pool = "6gig",
     deps = [
         ":load_balancer_fuzz_proto_cc_proto",
         "//source/common/upstream:load_balancer_context_base_lib",
@@ -120,6 +134,7 @@ envoy_cc_test_library(
 envoy_cc_test(
     name = "load_balancer_base_test",
     srcs = ["load_balancer_impl_base_test.cc"],
+    rbe_pool = "6gig",
     deps = [
         ":load_balancer_base_test_lib",
     ],

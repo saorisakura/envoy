@@ -29,7 +29,8 @@ public:
   void setConnectionStats(const ConnectionStats& stats) override;
   void setDelayedCloseTimeout(std::chrono::milliseconds timeout) override;
 
-  ExecutionContext* executionContext() const override;
+  // ScopeTrackedObject
+  OptRef<const StreamInfo::StreamInfo> trackedStream() const override;
 
 protected:
   void initializeDelayedCloseTimer();
@@ -46,7 +47,7 @@ protected:
   }
 
   absl::string_view localCloseReason() const override { return local_close_reason_; }
-  void setLocalCloseReason(absl::string_view local_close_reason) {
+  virtual void setLocalCloseReason(absl::string_view local_close_reason) {
     local_close_reason_ = std::string(local_close_reason);
   }
 
